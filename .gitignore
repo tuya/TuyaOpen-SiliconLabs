@@ -1,0 +1,8 @@
+CatalogKconfig
+*.build/
+build
+tools
+sdks
+TuyaOpen
+.prepare
+*__pycache__*

@@ -1,0 +1,336 @@
+diff --git a/components/board/silabs/component/rsilib_board.slcc b/components/board/silabs/component/rsilib_board.slcc
+index 88f162ee..10e09304 100644
+--- a/components/board/silabs/component/rsilib_board.slcc
++++ b/components/board/silabs/component/rsilib_board.slcc
+@@ -46,7 +46,7 @@ define:
+ template_contribution:
+   - name: event_handler
+     value:
+-      event: platform_init
++      event: internal_init_early
+       include: rsi_board.h
+       handler: RSI_Board_Init
+     priority: -9995
+diff --git a/components/common/inc/sl_constants.h b/components/common/inc/sl_constants.h
+index 0078656a..859fda2d 100644
+--- a/components/common/inc/sl_constants.h
++++ b/components/common/inc/sl_constants.h
+@@ -206,10 +206,11 @@
+ #define PRINT_ERROR_STATUS(tag, status) printf("\r\n%s %s:%d: 0x%x \r\n", tag, __FILE__, __LINE__, (unsigned int)status)
+ 
+ #ifdef PRINT_DEBUG_LOG
++#define DBG_FILE_NAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+ extern void sl_debug_log(const char *format, ...);
+ #define SL_DEBUG_LOG(format, ...)                                                         \
+   do {                                                                                    \
+-    sl_debug_log("%s:%s:%d:" format "\r\n", __FILE__, __func__, __LINE__, ##__VA_ARGS__); \
++    sl_debug_log("%s:%s:%d:" format "\r\n", DBG_FILE_NAME, __func__, __LINE__, ##__VA_ARGS__); \
+   } while (0)
+ #else
+ extern void sl_redirect_log(const char *format, ...);
+diff --git a/components/device/silabs/si91x/mcu/core/chip/src/startup_si91x.c b/components/device/silabs/si91x/mcu/core/chip/src/startup_si91x.c
+index 546821ac..b4c6e5c1 100644
+--- a/components/device/silabs/si91x/mcu/core/chip/src/startup_si91x.c
++++ b/components/device/silabs/si91x/mcu/core/chip/src/startup_si91x.c
+@@ -89,6 +89,12 @@ extern unsigned long _classified_bss_section_start_; /*!< Start address for the
+ extern unsigned long _classified_bss_section_end_;   /*!< End address for the .classified_data section   */
+ #endif
+ 
++#if (SLI_SI91X_MCU_PSRAM_PRESENT == ENABLE) && defined(SL_TUYAOPEN_BSS_SEGMENT_IN_PSRAM)
++extern unsigned long _tuyaopen_bss_section_start_; /*!< Start address for the .tuyaopen_bss section     */
++extern unsigned long _tuyaopen_bss_section_end_;   /*!< End address for the .tuyaopen_bss section   */
++#endif
++
++
+ /*---------------------------------------------------------------------------
+  * Internal References
+  *---------------------------------------------------------------------------*/
+@@ -279,6 +285,13 @@ void Zero_Table(void)
+     *pulDest++ = 0UL;
+   }
+ #endif
++
++#if (SLI_SI91X_MCU_PSRAM_PRESENT == ENABLE) && defined(SL_TUYAOPEN_BSS_SEGMENT_IN_PSRAM)
++  pulDest = &_tuyaopen_bss_section_start_;
++  for (; pulDest < &_tuyaopen_bss_section_end_;) {
++    *pulDest++ = 0UL;
++  }
++#endif
+ }
+ 
+ #if defined(SLI_SI91X_MCU_ENABLE_RAM_BASED_EXECUTION)
+diff --git a/components/device/silabs/si91x/mcu/core/common/component/si91x_debug.slcc b/components/device/silabs/si91x/mcu/core/common/component/si91x_debug.slcc
+index e854b809..53558aae 100644
+--- a/components/device/silabs/si91x/mcu/core/common/component/si91x_debug.slcc
++++ b/components/device/silabs/si91x/mcu/core/common/component/si91x_debug.slcc
+@@ -28,7 +28,7 @@ define:
+ template_contribution:
+   - name: event_handler
+     value:
+-      event: platform_init
++      event: internal_init_early
+       include: rsi_debug.h
+       handler: DEBUGINIT
+     priority: -9994
+diff --git a/components/device/silabs/si91x/mcu/drivers/peripheral_drivers/component/rsilib_dcache.slcc b/components/device/silabs/si91x/mcu/drivers/peripheral_drivers/component/rsilib_dcache.slcc
+index 7f46ef1f..5f5d2919 100644
+--- a/components/device/silabs/si91x/mcu/drivers/peripheral_drivers/component/rsilib_dcache.slcc
++++ b/components/device/silabs/si91x/mcu/drivers/peripheral_drivers/component/rsilib_dcache.slcc
+@@ -8,7 +8,7 @@ quality: production
+ metadata:
+   sbom:
+     license: Zlib
+-component_root_path: "components/device/silabs/si91x/mcu/drivers/peripheral_drivers"
++component_root_path: "components/device/silabs/si91x/mcu/drivers/unified_api"
+ source:
+   - path: "src/rsi_d_cache.c"
+ include:
+@@ -17,6 +17,8 @@ include:
+     - path: "rsi_d_cache.h"
+ provides:
+   - name: rsilib_dcache
++define:  
++  - name: SL_SI91X_D_CACHE_ENABLE
+ template_contribution:
+   - name: psram_dcache
+     value: true  
+diff --git a/components/device/silabs/si91x/mcu/drivers/service/clock_manager/component/sl_clock_manager.slcc b/components/device/silabs/si91x/mcu/drivers/service/clock_manager/component/sl_clock_manager.slcc
+index 9efc821a..6a2eccdf 100644
+--- a/components/device/silabs/si91x/mcu/drivers/service/clock_manager/component/sl_clock_manager.slcc
++++ b/components/device/silabs/si91x/mcu/drivers/service/clock_manager/component/sl_clock_manager.slcc
+@@ -29,7 +29,7 @@ requires:
+ template_contribution:
+   - name: event_handler
+     value:
+-      event: platform_init
++      event: internal_init_early
+       include: sl_si91x_clock_manager.h
+       handler: sl_si91x_clock_manager_init
+     priority: -9997
+\ No newline at end of file
+diff --git a/components/device/silabs/si91x/mcu/drivers/service/power_manager/src/sli_si91x_power_manager.c b/components/device/silabs/si91x/mcu/drivers/service/power_manager/src/sli_si91x_power_manager.c
+index d6512147..07de1100 100644
+--- a/components/device/silabs/si91x/mcu/drivers/service/power_manager/src/sli_si91x_power_manager.c
++++ b/components/device/silabs/si91x/mcu/drivers/service/power_manager/src/sli_si91x_power_manager.c
+@@ -582,7 +582,7 @@ static void ps4_to_ps0_state_change(void)
+   // Initializing and configuring the wakeup sources as per UC inputs, if available
+   status_ps4_to_ps0 = sl_si91x_power_manager_wakeup_init();
+   if (status_ps4_to_ps0 != SL_STATUS_OK) {
+-    DEBUGOUT("Error Code: 0x%lX, Power State Transition Failed \n", status_ps4_to_ps0);
++    // DEBUGOUT("Error Code: 0x%lX, Power State Transition Failed \n", status_ps4_to_ps0);
+     return;
+   }
+ #endif
+@@ -657,7 +657,7 @@ static void ps3_to_ps0_state_change(void)
+   // Initializing and configuring the wakeup sources as per UC inputs, if available
+   status_ps3_to_ps0 = sl_si91x_power_manager_wakeup_init();
+   if (status_ps3_to_ps0 != SL_STATUS_OK) {
+-    DEBUGOUT("Error Code: 0x%lX, Power State Transition Failed \n", status_ps3_to_ps0);
++    // DEBUGOUT("Error Code: 0x%lX, Power State Transition Failed \n", status_ps3_to_ps0);
+     return;
+   }
+ #endif
+diff --git a/components/device/silabs/si91x/mcu/drivers/unified_api/component/psram_core.slcc b/components/device/silabs/si91x/mcu/drivers/unified_api/component/psram_core.slcc
+index 4f95864e..fa761dc2 100644
+--- a/components/device/silabs/si91x/mcu/drivers/unified_api/component/psram_core.slcc
++++ b/components/device/silabs/si91x/mcu/drivers/unified_api/component/psram_core.slcc
+@@ -26,19 +26,18 @@ requires:
+   - name: romdriver_clks
+   - name: romdriver_qspi
+   - name: udma_linker_config
++  - name: rsilib_dcache
+ define:  
+   - name: SLI_SI91X_MCU_PSRAM_PRESENT
+   - name: SL_SI91X_REQUIRES_INTF_PLL
+ source:
+   - path: src/sl_si91x_psram.c
+   - path: src/sl_si91x_psram_handle.c
+-  - path: src/rsi_d_cache.c
+ include:
+   - path: inc
+     file_list:
+       - path: sl_si91x_psram.h
+-      - path: sl_si91x_psram_handle.h
+-      - path: rsi_d_cache.h      
++      - path: sl_si91x_psram_handle.h     
+ config_file:
+   - path: config/sl_si91x_psram_pin_config.h
+     file_id: psram_pin_config
+diff --git a/components/device/silabs/si91x/mcu/drivers/unified_api/inc/rsi_d_cache.h b/components/device/silabs/si91x/mcu/drivers/unified_api/inc/rsi_d_cache.h
+index 5e57fc2c..9a8c5020 100644
+--- a/components/device/silabs/si91x/mcu/drivers/unified_api/inc/rsi_d_cache.h
++++ b/components/device/silabs/si91x/mcu/drivers/unified_api/inc/rsi_d_cache.h
+@@ -71,6 +71,12 @@ extern "C" {
+ #define DCACHE_MAINT_CTRL_LINES_LOWER_ADDRESS_MASK \
+   (0x1F) // Mask to isolate the address of the cache line in a maintenance control register
+ 
++/** @brief D-Cache Control and Status Register */
++#define DCACHE_CTRL_AND_STATUS (*((uint32_t volatile *)(0x460081F8)))
++
++/** @brief This is BIT(10) in  D-Cache Control and Status Register using to disable Allocate signal*/
++#define HPORT_ALLOCATE_SIGNAL 0x400
++
+ /*******************************************************************************
+  ******************************   Structure    ********************************
+  ******************************************************************************/
+diff --git a/components/device/silabs/si91x/mcu/drivers/unified_api/inc/sl_si91x_psram.h b/components/device/silabs/si91x/mcu/drivers/unified_api/inc/sl_si91x_psram.h
+index 4c9e0856..a01327f2 100644
+--- a/components/device/silabs/si91x/mcu/drivers/unified_api/inc/sl_si91x_psram.h
++++ b/components/device/silabs/si91x/mcu/drivers/unified_api/inc/sl_si91x_psram.h
+@@ -33,7 +33,9 @@
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include "rsi_qspi_proto.h"
+-
++#if (SL_SI91X_D_CACHE_ENABLE == 1)
++#include "rsi_d_cache.h"
++#endif
+ /***************************************************************************/
+ /**
+  * @addtogroup PSRAM PSRAM Driver
+@@ -95,10 +97,8 @@
+ /** @brief Macro to convert Mbit to bits */
+ #define Mbit_(a) (a * 1000000)
+ 
+-/** @brief Enable D-Cache */
+-#define D_CACHE_ENABLE
++#if (SL_SI91X_D_CACHE_ENABLE == 1)
+ 
+-#ifdef D_CACHE_ENABLE
+ /** @brief M4SS D-Cache Base Address */
+ #define M4SS_DCACHE_BASE_ADDR (0x44040000)
+ 
+@@ -107,6 +107,7 @@
+ 
+ /** @brief D-Cache Maintenance Status Register */
+ #define DCACHE_REG_MAINT_STATUS (*((uint32_t volatile *)(M4SS_DCACHE_BASE_ADDR + 0x028)))
++
+ #endif
+ 
+ /** @endcond */
+diff --git a/components/device/silabs/si91x/mcu/drivers/unified_api/src/rsi_d_cache.c b/components/device/silabs/si91x/mcu/drivers/unified_api/src/rsi_d_cache.c
+index 28f62dfe..b84cba89 100644
+--- a/components/device/silabs/si91x/mcu/drivers/unified_api/src/rsi_d_cache.c
++++ b/components/device/silabs/si91x/mcu/drivers/unified_api/src/rsi_d_cache.c
+@@ -89,6 +89,9 @@ void rsi_d_cache_invalidate_all(void)
+   /*Wait until the operation is finished*/
+   while ((DCACHE->MAINT_STATUS & DCACHE_MAINT_STATUS_ONGOING_MAINT) != 0x0)
+     ;
++
++  /* Disable HPORT allocation signal */
++  DCACHE_CTRL_AND_STATUS &= ~(HPORT_ALLOCATE_SIGNAL);
+ }
+ 
+ /*==============================================*/
+diff --git a/components/device/silabs/si91x/mcu/drivers/unified_api/src/sl_si91x_psram.c b/components/device/silabs/si91x/mcu/drivers/unified_api/src/sl_si91x_psram.c
+index cdb0cb85..93eca3c6 100644
+--- a/components/device/silabs/si91x/mcu/drivers/unified_api/src/sl_si91x_psram.c
++++ b/components/device/silabs/si91x/mcu/drivers/unified_api/src/sl_si91x_psram.c
+@@ -951,7 +951,7 @@ sl_psram_return_type_t sl_si91x_psram_init()
+   rsi_error_t clkStatus               = RSI_FAIL;
+   uint8_t pinIndex                    = 0;
+   uint16_t clkDivFactor               = 0;
+-#ifdef D_CACHE_ENABLE
++#if (SL_SI91X_D_CACHE_ENABLE == 1)
+   uint32_t dCacheInitStatus = 0;
+ #endif
+ 
+@@ -1065,12 +1065,14 @@ sl_psram_return_type_t sl_si91x_psram_init()
+   }
+ 
+   /*D-cache Initialization*/
+-#ifdef D_CACHE_ENABLE
++#if (SL_SI91X_D_CACHE_ENABLE == 1)
+   DCACHE_REG_CTRL |= 0x3;
+   dCacheInitStatus = DCACHE_REG_MAINT_STATUS;
+   while (dCacheInitStatus != 0x101) {
+     dCacheInitStatus = DCACHE_REG_MAINT_STATUS;
+   }
++  /* Disable HPORT allocation signal */
++  DCACHE_CTRL_AND_STATUS &= ~(HPORT_ALLOCATE_SIGNAL);
+ #endif
+ 
+   return PSRAM_Status;
+@@ -1092,7 +1094,7 @@ sl_psram_return_type_t sl_si91x_psram_uninit(void)
+   RSI_QSPI_SpiInit((qspi_reg_t *)M4_QSPI_2_BASE_ADDRESS, (spi_config_t *)&spi_psram_default_config, 0, 0, 0);
+ 
+   /*disable cache*/
+-#ifdef D_CACHE_ENABLE
++#if (SL_SI91X_D_CACHE_ENABLE == 1)
+   DCACHE_REG_CTRL &= 0xFFFFFFFE;
+   while ((DCACHE_REG_MAINT_STATUS & 0x3) != 0x0)
+     ;
+diff --git a/components/device/silabs/si91x/mcu/sl_si91x_mcu.slcc b/components/device/silabs/si91x/mcu/sl_si91x_mcu.slcc
+index 879ddc19..3db0b5e5 100644
+--- a/components/device/silabs/si91x/mcu/sl_si91x_mcu.slcc
++++ b/components/device/silabs/si91x/mcu/sl_si91x_mcu.slcc
+@@ -47,7 +47,7 @@ template_contribution:
+     priority: -9998
+     condition: ["freertos"]
+     value: 
+-      event: platform_init
++      event: internal_init_early
+       handler: sl_si91x_device_init_nvic
+       include: rsi_nvic_priorities_config.h
+   - name: device_ram_addr
+diff --git a/components/device/silabs/si91x/wireless/crypto/aead/src/sl_si91x_psa_aead.c b/components/device/silabs/si91x/wireless/crypto/aead/src/sl_si91x_psa_aead.c
+index eb679f3e..c242f689 100644
+--- a/components/device/silabs/si91x/wireless/crypto/aead/src/sl_si91x_psa_aead.c
++++ b/components/device/silabs/si91x/wireless/crypto/aead/src/sl_si91x_psa_aead.c
+@@ -115,7 +115,7 @@ static psa_status_t sli_si91x_check_aead_parameters(const psa_key_attributes_t *
+           return PSA_ERROR_INVALID_ARGUMENT;
+       }
+       // verify nonce and tag lengths
+-      if ((tag_length < 4) || (tag_length > 16) || nonce_length != SLI_SI91X_GCM_IV_SIZE) {
++      if ((tag_length < 4) || (tag_length > 16) || (nonce_length < 4) || (nonce_length > SLI_SI91X_GCM_IV_SIZE)) {
+         return PSA_ERROR_INVALID_ARGUMENT;
+       }
+       break;
+diff --git a/components/device/silabs/si91x/wireless/crypto/gcm/src/sl_si91x_gcm.c b/components/device/silabs/si91x/wireless/crypto/gcm/src/sl_si91x_gcm.c
+index 27f623b7..8523078b 100644
+--- a/components/device/silabs/si91x/wireless/crypto/gcm/src/sl_si91x_gcm.c
++++ b/components/device/silabs/si91x/wireless/crypto/gcm/src/sl_si91x_gcm.c
+@@ -77,7 +77,7 @@ static sl_status_t sli_si91x_gcm_pending(sl_si91x_gcm_config_t *config,
+   }
+ 
+ #if defined(SLI_SI917B0)
+-  if ((config->gcm_mode == SL_SI91X_GCM_MODE) && config->nonce_length != SLI_SI91X_GCM_IV_SIZE) {
++  if ((config->gcm_mode == SL_SI91X_GCM_MODE) && ((config->nonce_length < 4) || (config->nonce_length > SLI_SI91X_GCM_IV_SIZE))) {
+     return SL_STATUS_INVALID_PARAMETER;
+   }
+ #else
+@@ -153,7 +153,7 @@ static sl_status_t sli_si91x_gcm_side_band(sl_si91x_gcm_config_t *config, uint8_
+       return SL_STATUS_INVALID_PARAMETER;
+   }
+ 
+-  if ((config->gcm_mode == SL_SI91X_GCM_MODE) && config->nonce_length != SLI_SI91X_GCM_IV_SIZE) {
++  if ((config->gcm_mode == SL_SI91X_GCM_MODE) && ((config->nonce_length < 4) || (config->nonce_length > SLI_SI91X_GCM_IV_SIZE))) {
+     return SL_STATUS_INVALID_PARAMETER;
+   }
+ 
+diff --git a/components/device/silabs/si91x/wireless/inc/sl_si91x_constants.h b/components/device/silabs/si91x/wireless/inc/sl_si91x_constants.h
+index c93cc260..ac83d194 100644
+--- a/components/device/silabs/si91x/wireless/inc/sl_si91x_constants.h
++++ b/components/device/silabs/si91x/wireless/inc/sl_si91x_constants.h
+@@ -220,7 +220,7 @@
+ #define SLI_SI91X_CCM_MSG_MAX_SIZE 1200
+ 
+ // GCM defines
+-#define SLI_SI91X_GCM_IV_SIZE      12
++#define SLI_SI91X_GCM_IV_SIZE      16
+ #define SLI_SI91X_GCM_AD_MAX_SIZE  128
+ #define SLI_SI91X_GCM_MSG_MAX_SIZE 1400
+ 
+diff --git a/components/service/network_manager/src/sl_net_for_lwip.c b/components/service/network_manager/src/sl_net_for_lwip.c
+index e3c42b17..81b23409 100644
+--- a/components/service/network_manager/src/sl_net_for_lwip.c
++++ b/components/service/network_manager/src/sl_net_for_lwip.c
+@@ -529,7 +529,7 @@ sl_status_t sl_net_wifi_client_down(sl_net_interface_t interface)
+   return sl_wifi_disconnect(SL_WIFI_CLIENT_INTERFACE);
+ }
+ 
+-sl_status_t sl_si91x_host_process_data_frame(sl_wifi_interface_t interface, sl_wifi_buffer_t *buffer)
++sl_status_t sl_si91x_host_process_data_frame_unused(sl_wifi_interface_t interface, sl_wifi_buffer_t *buffer)
+ {
+   struct netif *ifp;
+   sl_wifi_system_packet_t *packet;

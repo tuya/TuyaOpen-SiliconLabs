@@ -1,0 +1,13 @@
+id: sl_si91x_debug
+package: tuyaopen-si91x
+description: >
+  Workaround to disable rsi_debug.
+
+label: Debug Unit
+category: Device|Si91x|MCU|Common
+quality: production
+metadata:
+  sbom:
+    license: MSLA
+provides:
+  - name: si91x_debug

@@ -4,7 +4,10 @@ include(${TOP_SOURCE_DIR}/boards/SiWx917/common/CMakeLists.txt)
 set(PLATFORM_PUBINC_2
     ${BOARD_INC})
 
+# Prefer SiWx917 PSRAM-aware tuya_ringbuf.h over tools/porting template
+# (template maps OVERFLOW_PSRAM_* to normal types and breaks large AI buffers).
 set(PLATFORM_PUBINC
+    ${PLATFORM_PATH}/tuyaos_adapter/include/utilities/include
     ${PLATFORM_PUBINC_1}
     ${PLATFORM_PUBINC_2})
 

@@ -213,6 +213,7 @@ SECTIONS
         . = ALIGN(4);
         __bss_start__ = .;
         *(.bss*)
+        *(tuyaopen_bss_to_ram*)
         *(COMMON)
         . = ALIGN(4);
         __bss_end__ = .;

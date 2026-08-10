@@ -132,6 +132,46 @@ OPERATE_RET tkl_aes_crypt_ecb(TKL_SYMMETRY_HANDLE ctx, int32_t mode, size_t leng
 OPERATE_RET tkl_aes_crypt_cbc(TKL_SYMMETRY_HANDLE ctx, int32_t mode, size_t length, uint8_t iv[16],
                               const uint8_t *input, uint8_t *output);
 
+/**
+ * @brief AES-GCM authenticated encryption
+ * @param[in] key encryption key
+ * @param[in] key_len key length in bytes (16/24/32)
+ * @param[in] nonce IV/nonce
+ * @param[in] nonce_len nonce length in bytes
+ * @param[in] ad additional authenticated data, may be NULL
+ * @param[in] ad_len AAD length in bytes
+ * @param[in] input plaintext
+ * @param[in] input_len plaintext length in bytes
+ * @param[out] output ciphertext buffer
+ * @param[out] output_len bytes written to output
+ * @param[out] tag authentication tag buffer
+ * @param[in] tag_len tag length in bytes
+ * @return OPRT_OK on success
+ */
+OPERATE_RET tkl_aes_gcm_encode(const uint8_t *key, uint32_t key_len, const uint8_t *nonce, uint32_t nonce_len,
+                               const uint8_t *ad, uint32_t ad_len, const uint8_t *input, uint32_t input_len,
+                               uint8_t *output, uint32_t *output_len, uint8_t *tag, uint32_t tag_len);
+
+/**
+ * @brief AES-GCM authenticated decryption
+ * @param[in] key decryption key
+ * @param[in] key_len key length in bytes (16/24/32)
+ * @param[in] nonce IV/nonce used during encryption
+ * @param[in] nonce_len nonce length in bytes
+ * @param[in] ad additional authenticated data, may be NULL
+ * @param[in] ad_len AAD length in bytes
+ * @param[in] input ciphertext
+ * @param[in] input_len ciphertext length in bytes
+ * @param[out] output plaintext buffer
+ * @param[out] output_len bytes written to output
+ * @param[in] tag authentication tag to verify
+ * @param[in] tag_len tag length in bytes
+ * @return OPRT_OK on success
+ */
+OPERATE_RET tkl_aes_gcm_decode(const uint8_t *key, uint32_t key_len, const uint8_t *nonce, uint32_t nonce_len,
+                               const uint8_t *ad, uint32_t ad_len, const uint8_t *input, uint32_t input_len,
+                               uint8_t *output, uint32_t *output_len, uint8_t *tag, uint32_t tag_len);
+
 #ifdef __cplusplus
 }
 #endif

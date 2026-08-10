@@ -395,6 +395,53 @@ void *pvPortCallocPsram(size_t xNum, size_t xSize)
 }
 /*-----------------------------------------------------------*/
 
+void *pvPortReallocPsram(void *pv, size_t xWantedSize)
+{
+    uint8_t     *puc = (uint8_t *)pv;
+    BlockLink_t *pxLink;
+    size_t       xOldUsableSize;
+    void        *pvReturn;
+
+    if (pv == NULL) {
+        return pvPortMallocPsram(xWantedSize);
+    }
+
+    if (xWantedSize == 0) {
+        vPortFreePsram(pv);
+        return NULL;
+    }
+
+    /* An BlockLink_t structure sits immediately before the user pointer and
+     * carries the real block size, so the copy length is exact. A caller-level
+     * wrapper cannot know it and would have to copy the NEW size, reading past
+     * the end of the old block whenever the block grows. */
+    puc -= xHeapStructSize;
+    pxLink = (void *)puc;
+
+    heapVALIDATE_BLOCK_POINTER(pxLink);
+    configASSERT(heapBLOCK_IS_ALLOCATED(pxLink) != 0);
+
+    xOldUsableSize = (pxLink->xBlockSize & ~heapBLOCK_ALLOCATED_BITMASK) - xHeapStructSize;
+
+    /* Already big enough: realloc() is free to shrink in place. */
+    if (xWantedSize <= xOldUsableSize) {
+        return pv;
+    }
+
+    pvReturn = pvPortMallocPsram(xWantedSize);
+
+    if (pvReturn == NULL) {
+        /* realloc() must leave the original block valid when it fails. */
+        return NULL;
+    }
+
+    (void)memcpy(pvReturn, pv, xOldUsableSize);
+    vPortFreePsram(pv);
+
+    return pvReturn;
+}
+/*-----------------------------------------------------------*/
+
 static void prvHeapInitPsram(void) /* PRIVILEGED_FUNCTION */
 {
     BlockLink_t          *pxFirstFreeBlock;

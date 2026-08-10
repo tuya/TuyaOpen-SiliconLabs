@@ -238,7 +238,9 @@ SECTIONS
         . = ALIGN(4);
         __bss_start__ = .;
         *(.bss*)
-        *(.tuyaopen_bss_to_ram*)
+        /* Section name has no leading dot (see tuya_mem_section.h), so the
+         * pattern must not either, or the input section stays orphaned. */
+        *(tuyaopen_bss_to_ram*)
         *(COMMON)
         . = ALIGN(4);
         __bss_end__ = .;

@@ -280,10 +280,13 @@ static sl_status_t _tkl_wifi_ap_connected_event_handler(sl_wifi_event_t event, s
 static sl_status_t _tkl_wifi_ap_disconnected_event_handler(sl_wifi_event_t event, sl_status_t status_code,
                                                            const void *data, uint32_t data_length, const void *arg);
 static sl_status_t _tkl_wifi_scan_wait_complete(sl_status_t start_status);
-static OPERATE_RET _tkl_wifi_scan_handle_error(sl_status_t status);
+static OPERATE_RET _tkl_wifi_scan_prepare_retry(sl_status_t status);
 static OPERATE_RET _tkl_wifi_scan_build_ap_list(const int8_t *ssid, AP_IF_S **ap_ary, uint32_t *num);
 static size_t      _tkl_wifi_strnlen(const char *str, size_t max_len);
 static void        _tkl_wifi_ssid_copy(sl_wifi_ssid_t *dst, const char *src);
+static void        _tkl_wifi_register_callbacks(void);
+static OPERATE_RET _tkl_wifi_set_high_performance(void);
+static BOOL_T      _tkl_wifi_is_sta_only(void);
 
 static size_t _tkl_wifi_strnlen(const char *str, size_t max_len)
 {
@@ -307,6 +310,52 @@ static void _tkl_wifi_ssid_copy(sl_wifi_ssid_t *dst, const char *src)
     memcpy(dst->value, src, len);
     dst->value[len] = '\0';
     dst->length     = (uint8_t)len;
+}
+
+/**
+ * @brief Check whether firmware boots in STA-only mode
+ * @return TRUE if STA-only, FALSE otherwise
+ * @note SoftAP must not be started in this mode with BLE coex on SiWx917
+ */
+static BOOL_T _tkl_wifi_is_sta_only(void)
+{
+#if defined(WIFI_INIT_MODE_STA) && (WIFI_INIT_MODE_STA == 1)
+    return TRUE;
+#else
+    return (g_wifi_config.boot_config.oper_mode == SL_SI91X_CLIENT_MODE) ? TRUE : FALSE;
+#endif
+}
+
+/**
+ * @brief Keep NWP out of power-save for scan/join under BLE coex
+ * @return OPRT_OK on success, OPRT_COM_ERROR on failure
+ */
+static OPERATE_RET _tkl_wifi_set_high_performance(void)
+{
+    sl_wifi_performance_profile_v2_t performance_profile = {0};
+
+    performance_profile.profile = HIGH_PERFORMANCE;
+    sl_status_t status          = sl_wifi_set_performance_profile_v2(&performance_profile);
+    if (status != SL_STATUS_OK) {
+        TKL_LOGW("set HIGH_PERFORMANCE failed: 0x%lx", status);
+        return OPRT_COM_ERROR;
+    }
+
+    return OPRT_OK;
+}
+
+/**
+ * @brief Register WiFi join/scan/AP client event callbacks
+ * @return none
+ */
+static void _tkl_wifi_register_callbacks(void)
+{
+    sl_wifi_set_join_callback_v2((sl_wifi_join_callback_v2_t)_tkl_wifi_join_callback_handler, NULL);
+    sl_wifi_set_scan_callback_v2((sl_wifi_scan_callback_v2_t)_tkl_wifi_scan_callback_handler, NULL);
+    sl_wifi_set_callback_v2(SL_WIFI_CLIENT_CONNECTED_EVENTS,
+                            (sl_wifi_callback_function_v2_t)_tkl_wifi_ap_connected_event_handler, NULL);
+    sl_wifi_set_callback_v2(SL_WIFI_CLIENT_DISCONNECTED_EVENTS,
+                            (sl_wifi_callback_function_v2_t)_tkl_wifi_ap_disconnected_event_handler, NULL);
 }
 
 static sl_status_t _tkl_wifi_join_callback_handler(sl_wifi_event_t event, sl_status_t status_code, const char *result,
@@ -341,11 +390,12 @@ static sl_status_t _tkl_wifi_scan_callback_handler(sl_wifi_event_t event, sl_sta
     g_wifi_scan_callback_status = status_code;
 
     if (SL_WIFI_CHECK_IF_EVENT_FAILED(event)) {
-        g_wifi_scan_callback_status = *(const sl_status_t *)data;
-        return SL_STATUS_OK;
+        /* WiseConnect v2 already passes the real status in status_code.
+         * Do NOT dereference data as sl_status_t — that corrupts 0x10021 into garbage. */
+        return status_code;
     }
 
-    if (g_wifi_scan_result != NULL) {
+    if ((g_wifi_scan_result != NULL) && (data != NULL)) {
         memcpy(g_wifi_scan_result, data, g_wifi_scan_buf_size);
     }
 
@@ -533,7 +583,7 @@ static sl_status_t _tkl_wifi_scan_wait_complete(sl_status_t start_status)
     return g_wifi_scan_complete ? g_wifi_scan_callback_status : SL_STATUS_TIMEOUT;
 }
 
-static OPERATE_RET _tkl_wifi_scan_handle_error(sl_status_t status)
+static OPERATE_RET _tkl_wifi_scan_prepare_retry(sl_status_t status)
 {
     TKL_LOGE("WiFi Scan wait error 0x%lx", status);
     sl_wifi_stop_scan(SL_WIFI_CLIENT_2_4GHZ_INTERFACE);
@@ -541,6 +591,10 @@ static OPERATE_RET _tkl_wifi_scan_handle_error(sl_status_t status)
     if (status == SL_STATUS_TIMEOUT) {
         return OPRT_TIMEOUT;
     }
+
+    /* Soft recovery first: keep BLE coex alive, only wake WiFi radio. */
+    (void)_tkl_wifi_set_high_performance();
+    tkl_system_sleep(50);
 
     if (status != SL_STATUS_SI91X_COMMAND_GIVEN_IN_INVALID_STATE) {
         return OPRT_COM_ERROR;
@@ -556,29 +610,26 @@ static OPERATE_RET _tkl_wifi_scan_handle_error(sl_status_t status)
     tkl_system_reset();
 #endif
 
-    TKL_LOGD("Workaround: Reset wifi !!!");
-    tkl_system_sleep(100);
-
+    /*
+     * Full NWP reinit would tear down BLE under WLAN_BLE coex.
+     * Prefer soft recovery + one more scan attempt.
+     */
+    TKL_LOGW("WiFi INVALID_STATE: soft recover for retry (no NWP reinit)");
+    g_wifi_work_mode                    = WWM_STATION;
     g_wifi_config.boot_config.oper_mode = SL_SI91X_CLIENT_MODE;
-    if (sl_si91x_is_device_initialized()) {
-        sl_status_t deinit_status = sl_wifi_deinit();
-        if (deinit_status != SL_STATUS_OK) {
-            TKL_LOGD("sl_wifi_deinit error %lx", deinit_status);
-            return OPRT_COM_ERROR;
-        }
-    }
+    _tkl_wifi_register_callbacks();
 
-    sl_status_t init_status = sl_wifi_init(&g_wifi_config, NULL, sl_wifi_default_event_handler);
-    if (init_status != SL_STATUS_OK) {
-        TKL_LOGD("sl_wifi_init error %lx", init_status);
-        return OPRT_COM_ERROR;
-    }
-
-    return OPRT_COM_ERROR;
+    return OPRT_OK;
 }
 
 static OPERATE_RET _tkl_wifi_scan_build_ap_list(const int8_t *ssid, AP_IF_S **ap_ary, uint32_t *num)
 {
+    if ((g_wifi_scan_result == NULL) || (g_wifi_scan_result->scan_count == 0)) {
+        *ap_ary = NULL;
+        *num    = 0;
+        return OPRT_COM_ERROR;
+    }
+
     TKL_LOGD("WiFi Scan found %lu AP.", g_wifi_scan_result->scan_count);
 
     AP_IF_S *ap_items = (AP_IF_S *)tkl_system_malloc(g_wifi_scan_result->scan_count * sizeof(AP_IF_S));
@@ -591,28 +642,35 @@ static OPERATE_RET _tkl_wifi_scan_build_ap_list(const int8_t *ssid, AP_IF_S **ap
     uint32_t totals = 0;
     for (uint32_t i = 0; i < g_wifi_scan_result->scan_count; i++) {
         if (ssid != NULL) {
-            size_t filter_len =
-                _tkl_wifi_strnlen((const char *)ssid, WIFI_SSID_LEN);
+            size_t filter_len = _tkl_wifi_strnlen((const char *)ssid, WIFI_SSID_LEN);
             if (strncmp((const char *)ssid, (const char *)g_wifi_scan_result->scan_info[i].ssid, filter_len) != 0) {
                 continue;
             }
         }
-        ap_items[i].channel  = g_wifi_scan_result->scan_info[i].rf_channel;
-        ap_items[i].rssi     = g_wifi_scan_result->scan_info[i].rssi_val;
-        ap_items[i].security = g_wifi_scan_result->scan_info[i].security_mode;
-        ap_items[i].s_len =
+        ap_items[totals].channel  = g_wifi_scan_result->scan_info[i].rf_channel;
+        ap_items[totals].rssi     = g_wifi_scan_result->scan_info[i].rssi_val;
+        ap_items[totals].security = g_wifi_scan_result->scan_info[i].security_mode;
+        ap_items[totals].s_len =
             (uint8_t)_tkl_wifi_strnlen((const char *)g_wifi_scan_result->scan_info[i].ssid,
                                        sizeof(g_wifi_scan_result->scan_info[i].ssid));
-        if (ap_items[i].s_len > WIFI_SSID_LEN) {
-            ap_items[i].s_len = WIFI_SSID_LEN;
+        if (ap_items[totals].s_len > WIFI_SSID_LEN) {
+            ap_items[totals].s_len = WIFI_SSID_LEN;
         }
-        memcpy(ap_items[i].ssid, g_wifi_scan_result->scan_info[i].ssid, ap_items[i].s_len);
-        ap_items[i].ssid[ap_items[i].s_len] = '\0';
-        memcpy(ap_items[i].bssid, &g_wifi_scan_result->scan_info[i].bssid, 6);
-        totals++;
+        memcpy(ap_items[totals].ssid, g_wifi_scan_result->scan_info[i].ssid, ap_items[totals].s_len);
+        ap_items[totals].ssid[ap_items[totals].s_len] = '\0';
+        memcpy(ap_items[totals].bssid, &g_wifi_scan_result->scan_info[i].bssid, 6);
 
-        TKL_LOGD("ssid %-32s bssid " MACSTR " chan %d sec %d rssi %d", ap_items[i].ssid, MAC2STR(ap_items[i].bssid),
-                 ap_items[i].channel, ap_items[i].security, ap_items[i].rssi);
+        TKL_LOGD("ssid %-32s bssid " MACSTR " chan %d sec %d rssi %d", ap_items[totals].ssid,
+                 MAC2STR(ap_items[totals].bssid), ap_items[totals].channel, ap_items[totals].security,
+                 ap_items[totals].rssi);
+        totals++;
+    }
+
+    if (totals == 0) {
+        tkl_system_free(ap_items);
+        *ap_ary = NULL;
+        *num    = 0;
+        return OPRT_COM_ERROR;
     }
 
     *ap_ary = ap_items;
@@ -629,28 +687,8 @@ static OPERATE_RET _tkl_wifi_scan_build_ap_list(const int8_t *ssid, AP_IF_S **ap
 OPERATE_RET tkl_wifi_init(WIFI_EVENT_CB cb)
 {
     if (!g_wifi_initialized) {
-        sl_wifi_set_join_callback_v2((sl_wifi_join_callback_v2_t)_tkl_wifi_join_callback_handler, NULL);
-        sl_wifi_set_scan_callback_v2((sl_wifi_scan_callback_v2_t)_tkl_wifi_scan_callback_handler, NULL);
-        sl_wifi_set_callback_v2(SL_WIFI_CLIENT_CONNECTED_EVENTS,
-                                (sl_wifi_callback_function_v2_t)_tkl_wifi_ap_connected_event_handler, NULL);
-        sl_wifi_set_callback_v2(SL_WIFI_CLIENT_DISCONNECTED_EVENTS,
-                                (sl_wifi_callback_function_v2_t)_tkl_wifi_ap_disconnected_event_handler, NULL);
-
-        // /**
-        //  * Comment out this let SDK stack recover AP connection, it should be more power effiency
-        //  * than our retry
-        //  * */
-        // sl_wifi_advanced_client_configuration_t reconnection_config = {0};
-        // reconnection_config.beacon_missed_count     = SL_SI91X_WIFI_BEACON_MISSED_COUNT;
-        // reconnection_config.max_retry_attempts      = SL_SI91X_WIFI_SDK_RETRY_ATTEMPTS;
-        // reconnection_config.scan_interval           = 1;
-        // reconnection_config.first_time_retry_enable = 1;
-
-        // sl_status_t status = sl_wifi_set_advanced_client_configuration(SL_WIFI_CLIENT_INTERFACE,
-        //                                                                &reconnection_config);
-        // if (status != SL_STATUS_OK) {
-        //     TKL_LOGE("Failed to set advanced wifi interface configuration: 0x%lx", status);
-        // }
+        _tkl_wifi_register_callbacks();
+        (void)_tkl_wifi_set_high_performance();
 
 #if LWIP_NETIF_EXT_STATUS_CALLBACK
         netif_add_ext_callback(&_platform_netif_ext_callback, _platform_netif_ext_callback_function);
@@ -688,8 +726,13 @@ OPERATE_RET tkl_wifi_scan_ap(const int8_t *ssid, AP_IF_S **ap_ary, uint32_t *num
         tkl_wifi_init(NULL);
     }
 
-    sl_wifi_ssid_t  _ssid;
-    sl_wifi_ssid_t *specific_ssid = NULL;
+    (void)_tkl_wifi_set_high_performance();
+
+    sl_wifi_ssid_t               _ssid;
+    sl_wifi_ssid_t              *specific_ssid = NULL;
+    sl_wifi_scan_configuration_t scan_cfg      = default_wifi_scan_configuration;
+    OPERATE_RET                  tkl_result    = OPRT_COM_ERROR;
+    const uint8_t                max_attempts  = 2;
 
     if (ssid != NULL) {
         TKL_LOGD("Scan specific AP: %s", (const char *)ssid);
@@ -697,25 +740,39 @@ OPERATE_RET tkl_wifi_scan_ap(const int8_t *ssid, AP_IF_S **ap_ary, uint32_t *num
         _tkl_wifi_ssid_copy(specific_ssid, (const char *)ssid);
     }
 
-    g_wifi_scan_complete = false;
-    g_wifi_scan_result   = (sl_wifi_scan_result_t *)tkl_system_malloc(g_wifi_scan_buf_size);
-    memset(g_wifi_scan_result, 0, g_wifi_scan_buf_size);
+    for (uint8_t attempt = 0; attempt < max_attempts; attempt++) {
+        g_wifi_scan_complete        = false;
+        g_wifi_scan_callback_status = SL_STATUS_FAIL;
+        g_wifi_scan_result          = (sl_wifi_scan_result_t *)tkl_system_malloc(g_wifi_scan_buf_size);
+        if (g_wifi_scan_result == NULL) {
+            return OPRT_MALLOC_FAILED;
+        }
+        memset(g_wifi_scan_result, 0, g_wifi_scan_buf_size);
 
-    sl_status_t status =
-        sl_wifi_start_scan(SL_WIFI_CLIENT_2_4GHZ_INTERFACE, specific_ssid, &default_wifi_scan_configuration);
-    status = _tkl_wifi_scan_wait_complete(status);
+        sl_status_t status =
+            sl_wifi_start_scan(SL_WIFI_CLIENT_2_4GHZ_INTERFACE, specific_ssid, &scan_cfg);
+        status = _tkl_wifi_scan_wait_complete(status);
 
-    OPERATE_RET tkl_result = OPRT_OK;
-    if (status != SL_STATUS_OK) {
-        tkl_result = _tkl_wifi_scan_handle_error(status);
-    } else {
-        tkl_result = _tkl_wifi_scan_build_ap_list(ssid, ap_ary, num);
+        if (status == SL_STATUS_OK) {
+            tkl_result = _tkl_wifi_scan_build_ap_list(ssid, ap_ary, num);
+            tkl_system_free(g_wifi_scan_result);
+            g_wifi_scan_result = NULL;
+            return tkl_result;
+        }
+
+        tkl_result = _tkl_wifi_scan_prepare_retry(status);
+        tkl_system_free(g_wifi_scan_result);
+        g_wifi_scan_result = NULL;
+
+        if ((tkl_result != OPRT_OK) || ((attempt + 1) >= max_attempts)) {
+            return (tkl_result == OPRT_OK) ? OPRT_COM_ERROR : tkl_result;
+        }
+
+        TKL_LOGW("WiFi scan retry %u after recover", (unsigned)(attempt + 1));
+        tkl_system_sleep(100);
     }
 
-    tkl_system_free(g_wifi_scan_result);
-    g_wifi_scan_result = NULL;
-
-    return tkl_result;
+    return OPRT_COM_ERROR;
 }
 
 /**
@@ -728,10 +785,11 @@ OPERATE_RET tkl_wifi_scan_ap(const int8_t *ssid, AP_IF_S **ap_ary, uint32_t *num
  */
 OPERATE_RET tkl_wifi_release_ap(AP_IF_S *ap)
 {
-    TKL_UNUSED(ap);
-    TKL_LOGD("tkl_wifi_release_ap");
+    if (ap != NULL) {
+        tkl_system_free(ap);
+    }
 
-    return OPRT_NOT_SUPPORTED;
+    return OPRT_OK;
 }
 
 /**
@@ -745,6 +803,17 @@ OPERATE_RET tkl_wifi_start_ap(const WF_AP_CFG_IF_S *cfg)
     assert(NULL != cfg);
     sl_status_t        status;
     sl_wifi_security_t auth_mode = SL_WIFI_OPEN;
+
+    /*
+     * SiWx917: SoftAP + BLE cannot coexist. With WIFI_INIT_MODE_STA the NWP
+     * boots in CLIENT_MODE — calling sl_wifi_start_ap corrupts NWP state and
+     * later STA scan returns COMMAND_GIVEN_IN_INVALID_STATE (0x10021).
+     * Reject SoftAP here so BLE netcfg remains the provisioning path.
+     */
+    if (_tkl_wifi_is_sta_only()) {
+        TKL_LOGW("SoftAP skipped: STA-only + BLE coex (use BLE netcfg)");
+        return OPRT_NOT_SUPPORTED;
+    }
 
     // SSID
     g_wifi_ap_profile.config.ssid.length = cfg->s_len;
@@ -811,6 +880,8 @@ OPERATE_RET tkl_wifi_start_ap(const WF_AP_CFG_IF_S *cfg)
     status = sl_wifi_start_ap(SL_WIFI_AP_2_4GHZ_INTERFACE, &g_wifi_ap_profile.config);
     if (status == SL_STATUS_OK) {
         _tkl_wifi_ap_linkup();
+    } else {
+        TKL_LOGE("sl_wifi_start_ap failed: 0x%lx", status);
     }
 
     return status == SL_STATUS_OK ? OPRT_OK : OPRT_COM_ERROR;
@@ -1002,10 +1073,18 @@ OPERATE_RET tkl_wifi_set_work_mode(const WF_WK_MD_E mode)
         break;
 
     case WWM_SOFTAP:
+        if (_tkl_wifi_is_sta_only()) {
+            TKL_LOGW("wifi_set_work_mode SoftAP rejected: STA-only + BLE coex");
+            return OPRT_NOT_SUPPORTED;
+        }
         g_wifi_config.boot_config.oper_mode = SL_SI91X_ACCESS_POINT_MODE;
         break;
 
     case WWM_STATIONAP:
+        if (_tkl_wifi_is_sta_only()) {
+            TKL_LOGW("wifi_set_work_mode STATIONAP rejected: STA-only + BLE coex");
+            return OPRT_NOT_SUPPORTED;
+        }
         g_wifi_config.boot_config.oper_mode = SL_SI91X_CONCURRENT_MODE;
         break;
 
@@ -1159,9 +1238,9 @@ OPERATE_RET tkl_wifi_station_connect(const int8_t *ssid, const int8_t *passwd)
     sl_status_t        status;
     OPERATE_RET        tkl_result;
     int                retry;
-    AP_IF_S           *ap_info;
-    uint32_t           ap_info_nums;
-    sl_wifi_security_t security = SL_WIFI_SECURITY_UNKNOWN;
+    AP_IF_S           *ap_info      = NULL;
+    uint32_t           ap_info_nums = 0;
+    sl_wifi_security_t security     = SL_WIFI_SECURITY_UNKNOWN;
 
     if (ssid == NULL || passwd == NULL) {
         return OPRT_INVALID_PARM;
@@ -1176,14 +1255,24 @@ OPERATE_RET tkl_wifi_station_connect(const int8_t *ssid, const int8_t *passwd)
     memcpy(_psk, passwd, WIFI_PASSWD_LEN);
 
     tkl_system_sleep(1000);
+    (void)_tkl_wifi_set_high_performance();
+
     tkl_result = tkl_wifi_scan_ap(ssid, &ap_info, &ap_info_nums);
-    if (tkl_result == OPRT_OK && ap_info_nums > 0) {
+    if ((tkl_result == OPRT_OK) && (ap_info_nums > 0) && (ap_info != NULL)) {
         security = ap_info[0].security;
+        tkl_system_free(ap_info);
+        ap_info = NULL;
     } else {
-        return OPRT_COM_ERROR;
+        /* Scan may fail under BLE coex; still try join with common security. */
+        TKL_LOGW("scan before connect failed (%d), fallback WPA/WPA2 mixed", tkl_result);
+        security = SL_WIFI_WPA_WPA2_MIXED;
+        if (ap_info != NULL) {
+            tkl_system_free(ap_info);
+            ap_info = NULL;
+        }
     }
 
-    TKL_LOGD("Connect to SSID: %s, PSK: %s", _ssid, _psk);
+    TKL_LOGD("Connect to SSID: %s, security: %d", _ssid, (int)security);
     status = sl_net_set_credential(g_wifi_client_profile.config.credential_id, SL_NET_WIFI_PSK, _psk,
                                    _tkl_wifi_strnlen((const char *)_psk, WIFI_PASSWD_LEN));
     if (status == SL_STATUS_OK) {
@@ -1200,6 +1289,9 @@ OPERATE_RET tkl_wifi_station_connect(const int8_t *ssid, const int8_t *passwd)
             status = sl_wifi_connect(SL_WIFI_CLIENT_2_4GHZ_INTERFACE, &g_wifi_client_profile.config,
                                      SL_SI91X_WIFI_CONN_TIMEOUT);
             TKL_LOGD("sl_wifi_connect result %lx [%d]", status, SL_SI91X_WIFI_CONNECT_MAX_RETRY - retry);
+            if (status != SL_STATUS_OK) {
+                tkl_system_sleep(200);
+            }
             retry--;
         }
     } else {

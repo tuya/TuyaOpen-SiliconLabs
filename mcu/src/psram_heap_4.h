@@ -14,6 +14,7 @@ extern "C" {
 void  *pvPortMallocPsram(size_t xSize);
 void   vPortFreePsram(void *pv);
 void  *pvPortCallocPsram(size_t xNum, size_t xSize);
+void  *pvPortReallocPsram(void *pv, size_t xWantedSize);
 void   vPortInitialiseBlocksPsram(void);
 size_t xPortGetFreeHeapSizePsram(void);
 size_t xPortGetMinimumEverFreeHeapSizePsram(void);

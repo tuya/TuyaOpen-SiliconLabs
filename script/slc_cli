@@ -46,11 +46,42 @@ use_slc_from_path=1
 
 # ==============================================================================
 
+# Strip PATH entries that hijack JEP's embedded CPython (TuyaOpen .venv / .tools).
+_slc_clean_path()
+{
+    local clean_path=""
+    local part
+    local old_ifs="${IFS}"
+    IFS=':'
+    # shellcheck disable=SC2086
+    set -- ${PATH}
+    IFS="${old_ifs}"
+    for part in "$@"; do
+        case "${part}" in
+            */.venv|*/.venv/*|*/.tools/python|*/.tools/python/*)
+                continue
+                ;;
+        esac
+        if [ -z "${clean_path}" ]; then
+            clean_path="${part}"
+        else
+            clean_path="${clean_path}:${part}"
+        fi
+    done
+    printf '%s' "${clean_path}"
+}
+
 # Wrapper function to execute an slc command
 run_slc()
 {
     IFS=" " read -r -a slc_args <<<"${@}"
-    eval "${slc_cmd}" "${slc_args[*]}"
+    # TuyaOpen activates a .venv; VIRTUAL_ENV/PYTHON*/.venv-on-PATH make JEP
+    # (embedded CPython inside slc) miss its own site-packages (e.g. jinja2).
+    # Sanitize for SLC only. Keep eval for legacy quoting (--with=...).
+    local clean_path
+    clean_path="$(_slc_clean_path)"
+    eval env -u VIRTUAL_ENV -u PYTHONHOME -u PYTHONPATH PATH=\"${clean_path}\" \
+        "${slc_cmd}" "${slc_args[*]}"
 }
 
 # Find the command to use for slc

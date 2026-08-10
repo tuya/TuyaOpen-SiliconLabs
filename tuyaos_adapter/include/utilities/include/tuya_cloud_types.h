@@ -39,7 +39,10 @@ typedef int8_t  INT8_T;
 typedef int16_t  INT16_T;
 typedef uint16_t UINT16_T;
 
-typedef int32_t  INT32_T;
+/* INT32_T must be plain 'int' to match tuya_ai_types.h.
+ * On ARM GCC, int32_t is often 'long', which conflicts with 'int' despite same width.
+ */
+typedef int      INT32_T;
 typedef uint32_t UINT32_T;
 
 typedef int64_t  INT64_T;

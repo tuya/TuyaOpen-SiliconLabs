@@ -123,6 +123,9 @@ def need_prepare(root, prepare_file, target):
     if not os.path.exists(toolchain_path):
         print("Tools path not exists, need prepare.")
         result = True
+    if not _slc_installed(root):
+        print("SLC CLI not found, need prepare.")
+        result = True
     return result, libs_need_prepare
 
 
@@ -132,17 +135,107 @@ def record_prepare(prepare_file, target):
     return True
 
 
+def _slc_installed(root):
+    """
+    Return True if an slc/slc-cli executable is available on PATH or under tools/slc.
+    """
+    import shutil
+    if shutil.which("slc") or shutil.which("slc-cli"):
+        return True
+    slc_dir = os.path.join(root, "tools", "slc")
+    if not os.path.isdir(slc_dir):
+        return False
+    for dirpath, _, filenames in os.walk(slc_dir):
+        for name in filenames:
+            if name.startswith("slc"):
+                path = os.path.join(dirpath, name)
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    return True
+    return False
+
+
+def _ensure_jinja2(root):
+    """
+    SLC template generation needs Jinja2 in BOTH:
+    - the active interpreter (TuyaOpen .venv may be first on PATH)
+    - SLC's bundled Python under tools/slc
+    """
+    pythons = []
+    # Active interpreter
+    pythons.append(sys.executable)
+    # Common PATH names
+    import shutil
+    for name in ("python3", "python"):
+        p = shutil.which(name)
+        if p:
+            pythons.append(p)
+    # SLC bundled Python
+    slc_py = os.path.join(
+        root,
+        "tools",
+        "slc",
+        "slc_cli",
+        "bin",
+        "slc-cli",
+        "developer",
+        "adapter_packs",
+        "python",
+        "bin",
+        "python3.10",
+    )
+    if os.path.isfile(slc_py):
+        pythons.append(slc_py)
+
+    # Unique preserve order
+    seen = set()
+    uniq = []
+    for p in pythons:
+        if p and p not in seen:
+            seen.add(p)
+            uniq.append(p)
+
+    for py in uniq:
+        check = f'"{py}" -c "import jinja2"'
+        if do_subprocess(check) == 0:
+            continue
+        print(f"Jinja2 missing in {py}; installing ...")
+        # Prefer ensurepip+pip on that exact interpreter
+        do_subprocess(f'"{py}" -m ensurepip --upgrade')
+        if do_subprocess(f'"{py}" -m pip install "Jinja2~=3.1.2"') != 0:
+            # Fallback for uv-managed envs without pip module
+            if do_subprocess(f'uv pip install --python "{py}" "Jinja2~=3.1.2"') != 0:
+                print(f"ERROR: Failed to install Jinja2 for {py}")
+                return False
+        if do_subprocess(check) != 0:
+            print(f"ERROR: Jinja2 still missing for {py}")
+            return False
+    return True
+
+
 def download_tools(root, prepare_file):
     print("Downloading Tools...")
     toolchain_path = os.path.join(root, "tools/toolchain")
-    if not os.path.exists(toolchain_path):
-        print("Initialing toolchain ...")
-        cmds = [
-            "./script/bootstrap",
-        ]
-        cmd = " ".join(cmds)
-        if do_subprocess(cmd) != 0:
+    need_toolchain = not os.path.exists(toolchain_path)
+    need_slc = not _slc_installed(root)
+
+    if need_toolchain:
+        print("Initializing toolchain + Silicon Labs tools ...")
+        if do_subprocess("./script/bootstrap") != 0:
             return False
+    elif need_slc:
+        # Toolchain may already exist from a partial bootstrap; still need SLC CLI.
+        print("SLC CLI not found, installing Silicon Labs tools ...")
+        if do_subprocess("./script/bootstrap_silabs") != 0:
+            print("Failed to install SLC CLI. Run: ./script/bootstrap silabs")
+            return False
+
+    if not _slc_installed(root):
+        print("ERROR: SLC CLI still missing after bootstrap.")
+        print("Install manually: cd platform/SiWx917 && ./script/bootstrap silabs")
+        return False
+
+    if not _ensure_jinja2(root):
+        return False
     return True
 
 
@@ -229,6 +322,12 @@ def download_sdk(root, prepare_file, prepare_libs):
 def platform_prepare(root, target):
     prepare_file = os.path.join(root, ".prepare")
     prepare_flag, prepare_libs = need_prepare(root, prepare_file, target)
+
+    # Always ensure Jinja2 for SLC template generation (even if SDKs already prepared).
+    if not _ensure_jinja2(root):
+        print("Install Jinja2 failed.")
+        return False
+
     if not prepare_flag:
         print("No need prepare.")
         return True

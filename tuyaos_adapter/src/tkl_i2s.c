@@ -66,6 +66,7 @@ typedef struct {
     volatile bool                   is_streaming;
     volatile bool                   tx_flag;
     volatile bool                   rx_flag;
+    volatile bool                   tx_configured;
     TUYA_I2S_BASE_CFG_T             config;
     sl_i2s_handle_t                 handle;
     sl_i2s_signal_event_t           event_handler;
@@ -82,6 +83,7 @@ typedef struct {
 // -----------------------------------------------------------------------------
 
 static sl_status_t _tkl_i2s_mode_receive(TUYA_I2S_NUM_E i2s_num);
+static sl_status_t _tkl_i2s_mode_transmit(TUYA_I2S_NUM_E i2s_num);
 static sl_status_t _tkl_i2s_receive_data(TUYA_I2S_NUM_E i2s_num);
 static uint32_t    _tkl_i2s_copy_stereo_right_to_mono(int16_t *dst, const int16_t *src, uint32_t mono_frames);
 
@@ -172,6 +174,7 @@ void _tkl_i2s_event_handler(TUYA_I2S_NUM_E i2s_num, uint32_t event)
 {
     switch (event) {
     case SL_I2S_SEND_COMPLETE:
+        /* Only clear flag in ISR. Do not call into OS APIs here. */
         sg_i2s_hdl[i2s_num].tx_flag = 0;
         break;
 
@@ -214,6 +217,35 @@ sl_status_t _tkl_i2s_mode_receive(TUYA_I2S_NUM_E i2s_num)
     status = sl_si91x_i2s_config_transmit_receive(sg_i2s_hdl[i2s_num].handle, &i2s_xfer_config);
     I2S0->CHANNEL_CONFIG[0].I2S_IMR &= ~F_RXDAM;
     I2S0->CHANNEL_CONFIG[0].I2S_IMR |= F_RXFOM;
+
+    /* RX reconfigures the peripheral; force TX path to re-init next send */
+    sg_i2s_hdl[i2s_num].tx_configured = false;
+
+    return status;
+}
+
+/**
+ * @brief Configure I2S peripheral for TX once per TX session
+ * @param[in] i2s_num i2s port number
+ * @return SL_STATUS_OK on success
+ */
+static sl_status_t _tkl_i2s_mode_transmit(TUYA_I2S_NUM_E i2s_num)
+{
+    sl_i2s_xfer_config_t i2s_xfer_config = {0};
+    sl_status_t          status;
+
+    i2s_xfer_config.mode          = SL_I2S_MASTER;
+    i2s_xfer_config.protocol      = SL_I2S_PROTOCOL;
+    i2s_xfer_config.resolution    = SL_I2S_RESOLUTION_16;
+    /* Keep historical value that matches current speaker clocking on this board */
+    i2s_xfer_config.sampling_rate = 8000;
+    i2s_xfer_config.transfer_type = SL_I2S_TRANSMIT;
+    i2s_xfer_config.data_size     = SL_I2S_DATA_SIZE16;
+
+    status = sl_si91x_i2s_config_transmit_receive(sg_i2s_hdl[i2s_num].handle, &i2s_xfer_config);
+    if (status == SL_STATUS_OK) {
+        sg_i2s_hdl[i2s_num].tx_configured = true;
+    }
 
     return status;
 }
@@ -332,40 +364,50 @@ OPERATE_RET tkl_i2s_init(TUYA_I2S_NUM_E i2s_num, const TUYA_I2S_BASE_CFG_T *i2s_
 
 OPERATE_RET tkl_i2s_send(TUYA_I2S_NUM_E i2s_num, void *buff, uint32_t len)
 {
-    OPERATE_RET          rt = OPRT_OK;
-    sl_status_t          status;
-    sl_i2s_xfer_config_t i2s_xfer_config = {0};
+    OPERATE_RET rt = OPRT_OK;
+    sl_status_t status;
 
     if (!sg_i2s_hdl[i2s_num].is_init) {
         TKL_LOGE("I2S not initialized");
         return OPRT_COM_ERROR;
     }
 
+    if ((buff == NULL) || (len < 2)) {
+        return OPRT_INVALID_PARM;
+    }
+
     if (sg_i2s_hdl[i2s_num].tx_flag) {
         return OPRT_SEND_ERR;
     }
 
-    i2s_xfer_config.mode          = SL_I2S_MASTER;
-    i2s_xfer_config.protocol      = SL_I2S_PROTOCOL;
-    i2s_xfer_config.resolution    = SL_I2S_RESOLUTION_16;
-
-    /* Don't know why BUT it works. Need to check Wiseconnect SDK for the correct sampling rate */
-    i2s_xfer_config.sampling_rate = 8000;
-
-    i2s_xfer_config.transfer_type = SL_I2S_TRANSMIT;
-    i2s_xfer_config.data_size     = SL_I2S_DATA_SIZE16;
-
-    status = sl_si91x_i2s_config_transmit_receive(sg_i2s_hdl[i2s_num].handle, &i2s_xfer_config);
-    if (status != SL_STATUS_OK) {
-        TKL_LOGE("I2S transmit config fail %ld", status);
-        return OPRT_COM_ERROR;
+    /* Configure TX only once per session; avoid gap from reconfig on every chunk */
+    if (!sg_i2s_hdl[i2s_num].tx_configured) {
+        status = _tkl_i2s_mode_transmit(i2s_num);
+        if (status != SL_STATUS_OK) {
+            TKL_LOGE("I2S transmit config fail %ld", status);
+            return OPRT_COM_ERROR;
+        }
     }
 
     sg_i2s_hdl[i2s_num].tx_flag = 1;
     status                      = sl_si91x_i2s_transmit_data(sg_i2s_hdl[i2s_num].handle, buff, len / 2);
     if (status != SL_STATUS_OK) {
-        TKL_LOGE("I2S transmit start fail %ld", status);
-        return OPRT_COM_ERROR;
+        /* Retry once with fresh TX config */
+        sg_i2s_hdl[i2s_num].tx_flag       = 0;
+        sg_i2s_hdl[i2s_num].tx_configured = false;
+        status = _tkl_i2s_mode_transmit(i2s_num);
+        if (status != SL_STATUS_OK) {
+            TKL_LOGE("I2S transmit reconfig fail %ld", status);
+            return OPRT_COM_ERROR;
+        }
+        sg_i2s_hdl[i2s_num].tx_flag = 1;
+        status                      = sl_si91x_i2s_transmit_data(sg_i2s_hdl[i2s_num].handle, buff, len / 2);
+        if (status != SL_STATUS_OK) {
+            sg_i2s_hdl[i2s_num].tx_flag       = 0;
+            sg_i2s_hdl[i2s_num].tx_configured = false;
+            TKL_LOGE("I2S transmit start fail %ld", status);
+            return OPRT_COM_ERROR;
+        }
     }
 
     return rt;
@@ -446,7 +488,8 @@ OPERATE_RET tkl_i2s_send_stop(TUYA_I2S_NUM_E i2s_num)
 
     status = sl_si91x_i2s_end_transfer(sg_i2s_hdl[i2s_num].handle, SL_I2S_SEND_ABORT);
     TKL_LOGD("i2s tx stop %ld", status);
-    sg_i2s_hdl[i2s_num].tx_flag = 0;
+    sg_i2s_hdl[i2s_num].tx_flag       = 0;
+    sg_i2s_hdl[i2s_num].tx_configured = false;
 
     return rt;
 }

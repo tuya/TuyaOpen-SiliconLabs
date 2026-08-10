@@ -58,6 +58,10 @@ trust_sdk_and_extensions()
         extension_dirs+=("${vendor_extension_abs_path}")
     fi
 
+    # Canonicalize SDK path so SLC path checks work when sdks/ is a symlink
+    # (e.g. shared SDK tree outside this worktree).
+    sdk_dir="$(realpath "${sdk_dir}")"
+
     set +x
     echo "======================================================================"
     echo "Trusting Simplicity SDK              :'${sdk_dir}':"
@@ -98,7 +102,7 @@ trust_sdk_and_extensions()
             # Guard against CRLF in upstream .slce files (e.g. "wiseconnect3_sdk\r")
             extension_name="${extension_name//$'\r'/}"
 
-            # Define symlink location
+            # Define symlink location (must stay under canonical sdk_dir)
             local extension_symlink="${sdk_dir}/extension/${extension_name}"
 
             set +x
@@ -109,12 +113,10 @@ trust_sdk_and_extensions()
             echo "======================================================================"
             set -x
 
-            # Create symlink if it doesn't already exist
-            if [ ! -L "${extension_symlink}" ]; then
-                ln -s "${extension_dir}" "${extension_symlink}"
-            fi
+            # Always refresh symlink so shared SDK points at the current worktree
+            ln -sfn "${extension_dir}" "${extension_symlink}"
 
-            # Trust the extension
+            # Trust the extension (extpath must be under the same real sdk_dir)
             run_slc -v 1 signature trust --sdk "${sdk_dir}" -extpath "${extension_symlink}" -data "${tuyaopen_slc_data}"
         done
     done

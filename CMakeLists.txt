@@ -71,7 +71,9 @@ set(ADAPTER_SRC
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_ota.c"  
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_vad.c"
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_asr.c"
-    "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_display.c" 
+    "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_kws.c"
+    "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_display.c"
+    "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_symmetry.c"
 )
         
 set(INIT_SRC "${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/init/src/tkl_init_common.c")
@@ -125,6 +127,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/i2c
     ${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/i2s
     ${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/init/include
+    ${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/kws
     ${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/media
     ${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/network
     ${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/pinmux

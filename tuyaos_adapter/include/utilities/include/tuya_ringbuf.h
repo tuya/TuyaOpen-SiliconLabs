@@ -24,7 +24,7 @@ typedef enum {
     OVERFLOW_COVERAGE_TYPE, ///< unread buff area will be overwritten when writing overflow
 } RINGBUFF_TYPE_E;
 
-#if defined(CONFIG_SPIRAM)
+#if defined(CONFIG_SPIRAM) || (defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1))
 #define TUYA_PSARM_SUPPORT
 #endif
 

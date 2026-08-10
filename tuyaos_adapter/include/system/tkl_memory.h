@@ -125,6 +125,26 @@ void *tkl_system_psram_malloc(size_t size);
 void tkl_system_psram_free(void *ptr);
 
 /**
+ * @brief Allocate and clear memory from PSRAM
+ *
+ * @param[in] nitems number of elements
+ * @param[in] size size of each element in bytes
+ *
+ * @return allocated zeroed memory address, or NULL on failure
+ */
+void *tkl_system_psram_calloc(size_t nitems, size_t size);
+
+/**
+ * @brief Reallocate memory in PSRAM
+ *
+ * @param[in] ptr previously allocated pointer, may be NULL
+ * @param[in] size new size in bytes
+ *
+ * @return reallocated memory address, or NULL on failure
+ */
+void *tkl_system_psram_realloc(void *ptr, size_t size);
+
+/**
  * @brief Get PSRAM free heap size
  *
  * @param none

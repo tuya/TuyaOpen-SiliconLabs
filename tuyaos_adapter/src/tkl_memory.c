@@ -255,6 +255,37 @@ void tkl_system_psram_free(void *ptr)
 }
 
 /**
+ * @brief Allocate and clear memory from PSRAM
+ * @param[in] nitems number of elements
+ * @param[in] size size of each element in bytes
+ * @return allocated zeroed memory address, or NULL on failure
+ */
+void *tkl_system_psram_calloc(size_t nitems, size_t size)
+{
+    void *p = pvPortCallocPsram(nitems, size);
+    TKL_LOGV("calloc 0x%08lx %u x %u", (uint32_t)p, nitems, size);
+
+    return p;
+}
+
+/**
+ * @brief Reallocate memory in PSRAM
+ * @param[in] ptr previously allocated pointer, may be NULL
+ * @param[in] size new size in bytes
+ * @return reallocated memory address, or NULL on failure
+ * @note Delegated to the heap, which reads the real block size from the block
+ *       header. Copying here instead would have to assume the new size and read
+ *       past the end of the old block whenever the block grows.
+ */
+void *tkl_system_psram_realloc(void *ptr, size_t size)
+{
+    void *p = pvPortReallocPsram(ptr, size);
+    TKL_LOGV("realloc 0x%08lx -> 0x%08lx %u", (uint32_t)ptr, (uint32_t)p, size);
+
+    return p;
+}
+
+/**
  * @brief Get PSRAM free heap size
  *
  * @param none

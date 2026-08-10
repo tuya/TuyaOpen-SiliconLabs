@@ -139,16 +139,8 @@ static void app_main_handle(void *arg)
         TKL_LOGI("WiFi initialization success");
     }
 
-    // sl_wifi_performance_profile_v2_t performance_profile = { .profile = HIGH_PERFORMANCE };
-
-    // status = sl_wifi_set_performance_profile_v2(&performance_profile);
-    // if (status != SL_STATUS_OK) {
-    //     TKL_LOGE("Failed to keep module in HIGH_PERFORMANCE mode eror 0x%lX", status);
-    //     return;
-    // }
-
-    // sl_clock_scaling_t clock_scaling = sl_si91x_power_manager_get_clock_scaling();
-    // TKL_LOGI("clock_scaling %d", clock_scaling);
+    /* HIGH_PERFORMANCE is applied in tkl_wifi scan/connect path under BLE coex.
+     * Keep boot path aligned with V1.6 (do not force profile here). */
 
 #ifdef SLI_SI91X_MCU_INTERFACE
     uint8_t xtal_enable = 1;

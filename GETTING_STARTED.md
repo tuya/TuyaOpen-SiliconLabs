@@ -8,6 +8,9 @@ The SiWx917 platform is **not** a standalone project. It must live inside the Tu
 ~/TuyaOpen/platform/SiWx917
 ```
 
+> **Note:** SiWx917 is a first-class platform in current TuyaOpen. Board support lives in
+> `boards/SiWx917/` in the main repository, so no integration patch has to be applied.
+
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
@@ -15,11 +18,10 @@ The SiWx917 platform is **not** a standalone project. It must live inside the Tu
 - [Overview](#overview)
 - [Step-by-Step Setup](#step-by-step-setup)
   - [Step 1: Clone TuyaOpen](#step-1-clone-tuyaopen)
-  - [Step 2: Clone SiWx917 Platform](#step-2-clone-siwx917-platform)
-  - [Step 3: Apply TuyaOpen Patch](#step-3-apply-tuyaopen-patch)
-  - [Step 4: Set Up Build Environment](#step-4-set-up-build-environment)
-  - [Step 5: Configure the Application](#step-5-configure-the-application)
-  - [Step 6: Build](#step-6-build)
+  - [Step 2: Prepare SiWx917 Platform](#step-2-prepare-siwx917-platform)
+  - [Step 3: Set Up Build Environment](#step-3-set-up-build-environment)
+  - [Step 4: Configure the Application](#step-4-configure-the-application)
+  - [Step 5: Build](#step-5-build)
 - [Quick Reference](#quick-reference)
 - [Next Steps](#next-steps)
 - [Notes](#notes)
@@ -29,9 +31,9 @@ The SiWx917 platform is **not** a standalone project. It must live inside the Tu
 
 - **OS:** Ubuntu 22.04 LTS (recommended) or compatible Linux
 - **Git**
-- **Python 3.10+**
-- **SSH key** (only if cloning the platform repository via SSH)
+- **Python 3.12** (managed by `export.sh` / `uv`)
 - Build tools are installed automatically by `export.sh` (CMake, Ninja, and Python packages)
+- Silicon Labs SLC / Simplicity tools (pulled by `platform_prepare.py` as needed)
 
 Verify basics:
 
@@ -45,18 +47,18 @@ git --version
 ```text
 ~/TuyaOpen/
 ├── .venv/
-├── apps/tuya.ai/your_chat_bot/
-│   └── config/SIWX917_AI_DEV_KIT.config
-├── boards/SiWx917/                  # from patch
+├── apps/
+│   ├── tuya.ai/your_chat_bot/config/SIWX917_AI_DEV_KIT.config
+│   └── tuya_cloud/switch_demo/config/SIWX917_AI_DEV_KIT.config
+├── boards/SiWx917/                  # first-class board support in main repo
 ├── platform/
-│   ├── platform_config.yaml
-│   └── SiWx917/                     # platform repository
+│   ├── platform_config.yaml         # includes SiWx917 entry
+│   └── SiWx917/                     # this platform repository
 │       ├── tuyaos_adapter/
 │       ├── mcu/
 │       │   └── patch/RS9117_WC_SI.rps   # TA patch (flash once per device)
 │       ├── slc/
-│       ├── tools/
-│       └── projects/tuya_open_patch/v1.6.0/01_TuyaOpen_v1.6.0.patch
+│       └── tools/
 └── export.sh
 ```
 
@@ -64,10 +66,9 @@ git --version
 
 Setup flow:
 
-1. Clone [TuyaOpen](https://github.com/tuya/TuyaOpen) v1.6.0 into `~/TuyaOpen`
-2. Clone the SiWx917 platform repository into `~/TuyaOpen/platform/SiWx917`
-3. Apply the integration patch from the platform repo onto TuyaOpen
-4. Configure and build the `your_chat_bot` example
+1. Clone a TuyaOpen tree that already contains `boards/SiWx917/` and a `SiWx917` entry in `platform/platform_config.yaml`
+2. Ensure `platform/SiWx917` points at this repository (`dev` branch recommended while porting)
+3. Configure and build `switch_demo` first, then `your_chat_bot`
 
 ## Step-by-Step Setup
 
@@ -77,60 +78,40 @@ Setup flow:
 mkdir -p ~/TuyaOpen
 cd ~/TuyaOpen
 git clone https://github.com/tuya/TuyaOpen.git .
-git checkout v1.6.0
 ```
 
-**Details:**
-- **URL:** https://github.com/tuya/TuyaOpen.git
-- **Tag:** v1.6.0
-- **Commit:** b07b9b2dfab59ed4f49cd635ac6f46ce9336268b
+Use a tree that already integrates SiWx917 (boards + `platform_config.yaml`). If you are developing against a local fork, keep that commit pinned.
 
-After checking out the tag, Git reports a detached HEAD state. That is expected.
+### Step 2: Prepare SiWx917 Platform
 
-### Step 2: Clone SiWx917 Platform
+`tos.py` / platform prepare downloads platforms listed in `platform/platform_config.yaml`.
 
-Clone the [TuyaOpen-SiliconLabs](https://github.com/tuya/TuyaOpen-SiliconLabs) repository **into** `platform/SiWx917` inside the TuyaOpen tree.
+For local development you can also place this repo directly:
 
 ```bash
 cd ~/TuyaOpen
 mkdir -p platform
 git clone https://github.com/tuya/TuyaOpen-SiliconLabs.git platform/SiWx917
 cd platform/SiWx917
-git checkout master
+git checkout dev
 ```
 
-**Details:**
-- **URL:** https://github.com/tuya/TuyaOpen-SiliconLabs
-- **Location:** `~/TuyaOpen/platform/SiWx917` (required by the TuyaOpen build system)
-- **Branch:** `master` (or the release branch documented in your version)
+Or symlink a working copy:
 
-Update `platform/platform_config.yaml` if the pinned commit differs from your checkout:
+```bash
+ln -sfn /path/to/TuyaOpen-SiliconLabs ~/TuyaOpen/platform/SiWx917
+```
+
+Confirm `platform/platform_config.yaml` contains:
 
 ```yaml
 - name: SiWx917
-  repo: https://github.com/tuya/TuyaOpen-SiliconLabs.git
-  branch: master
+  repo: https://github.com/tuya/TuyaOpen-SiliconLabs
+  branch: dev
   commit: <pinned-commit-sha>
 ```
 
-### Step 3: Apply TuyaOpen Patch
-
-The patch adds SiWx917 board support and required changes to the TuyaOpen tree (boards, Kconfig, example apps, and so on).
-
-```bash
-cd ~/TuyaOpen
-git apply --ignore-whitespace --reject \
-  platform/SiWx917/projects/tuya_open_patch/v1.6.0/01_TuyaOpen_v1.6.0.patch
-```
-
-**Patch file:**
-- `platform/SiWx917/projects/tuya_open_patch/v1.6.0/01_TuyaOpen_v1.6.0.patch`
-
-Trailing-whitespace warnings during `git apply` are informational and can be ignored.
-
-If the patch is already applied, `git apply` will fail. Check for `boards/SiWx917/` in the TuyaOpen tree to confirm.
-
-### Step 4: Set Up Build Environment
+### Step 3: Set Up Build Environment
 
 ```bash
 cd ~/TuyaOpen
@@ -138,33 +119,36 @@ source export.sh
 ```
 
 This script:
+
 - Creates `~/TuyaOpen/.venv`
-- Installs Python dependencies from `requirements.txt`
-- Prepares CMake, Ninja, and other build tools
+- Syncs Python dependencies
+- Prepares host build tools
 
 Run `source export.sh` in every new terminal session before building.
 
-### Step 5: Configure the Application
+### Step 4: Configure the Application
+
+Select the board config with `tos.py config choice` and pick **`SIWX917_AI_DEV_KIT.config`**
+by name — the menu index shifts as new board configs are added.
 
 ```bash
-cd ~/TuyaOpen/apps/tuya.ai/your_chat_bot
+cd ~/TuyaOpen/apps/tuya_cloud/switch_demo   # smoke test first
 source ~/TuyaOpen/export.sh
 tos.py config choice
 ```
 
-Select **`SIWX917_AI_DEV_KIT.config`** from the list. The menu index can change as new board configs are added, so always choose by **name**, not by a fixed number.
-
-As of TuyaOpen v1.6.0, `SIWX917_AI_DEV_KIT.config` is typically option **6**:
-
-```text
-Choice config file: 6    # SIWX917_AI_DEV_KIT.config
+```bash
+cd ~/TuyaOpen/apps/tuya.ai/your_chat_bot    # then the AI chat bot
+tos.py config choice
 ```
 
-Saved config path:
-
-```text
-~/TuyaOpen/apps/tuya.ai/your_chat_bot/config/SIWX917_AI_DEV_KIT.config
-```
+`tos.py config choice` copies the selected file over `app_default.config` — that
+is how the tool records the active selection — and then regenerates the build
+cache. Treat `app_default.config` as tool-managed scratch: keep durable settings
+in `config/<BOARD>.config`, and do **not** commit the churn `config choice` leaves
+behind. `app_default.config` is the app's default for every platform, so
+committing a SiWx917 copy of it makes an unconfigured build target SiWx917 for
+everyone else.
 
 #### Advanced configuration (optional)
 
@@ -178,83 +162,43 @@ Useful options under **SiWx917**:
 |------|---------|
 | Choice a board | `SIWX917_AI_DEV_KIT` (recommended), `BRD2605A` |
 | Peripherals config | UART, I2S, GPIO, SPI/I2C |
-| Flash Configuration → M4 Flash Size | `2040 KB` (default), `3008 KB` |
+| Core M4 Flash Size | `2040 KB` (default), `3008 KB` |
 
-**M4 flash size change:** If you switch from 2040 KB to 3008 KB, update the device MBR after build. The build prints instructions and generates `mbr_config.json`. Example:
+**Changing M4 flash size requires an MBR update on the device.** After building
+with `3008 KB`, the build prints instructions and generates `mbr_config.json`:
 
 ```bash
-commander manufacturing write tambr --data mbr_config.json -d SiWG917M111MGTBA
+commander manufacturing write tambr  --data mbr_config.json -d SiWG917M111MGTBA
 commander manufacturing write m4mbrcf --data mbr_config.json -d SiWG917M111MGTBA
 ```
 
 Commander is bundled at `platform/SiWx917/tools/commander/commander`.
 
-### Step 6: Build
+### Step 5: Build
 
 ```bash
-cd ~/TuyaOpen/apps/tuya.ai/your_chat_bot
-source ~/TuyaOpen/export.sh
 tos.py build
 ```
 
-**Build flow:**
-1. Detect `platform/SiWx917` (skip auto-download if already present)
-2. Run platform `build_setup.py`
-3. Configure via Kconfig
-4. Compile with CMake and Ninja
-
-Build output is under the project `build/` directory.
-
-If the platform commit does not match `platform/platform_config.yaml`, `tos.py` may prompt to update. For local development you can keep your checked-out branch/commit.
+Firmware artifacts are under the app `dist/` / `.build/` directories.
 
 ## Quick Reference
 
-```bash
-# 1. Clone TuyaOpen
-mkdir -p ~/TuyaOpen && cd ~/TuyaOpen
-git clone https://github.com/tuya/TuyaOpen.git .
-git checkout v1.6.0
-
-# 2. Clone platform into platform/SiWx917
-mkdir -p platform
-git clone https://github.com/tuya/TuyaOpen-SiliconLabs.git platform/SiWx917
-
-# 3. Apply patch
-git apply --ignore-whitespace --reject \
-  platform/SiWx917/projects/tuya_open_patch/v1.6.0/01_TuyaOpen_v1.6.0.patch
-
-# 4. Environment
-source export.sh
-
-# 5. Configure (select SIWX917_AI_DEV_KIT.config)
-cd apps/tuya.ai/your_chat_bot
-tos.py config choice
-
-# 6. Build
-tos.py build
-```
+| Item | Value |
+|------|-------|
+| Platform name | `SiWx917` |
+| Board (AI kit) | `SIWX917_AI_DEV_KIT` |
+| Platform repo | `platform/SiWx917` |
+| Chat bot config | `apps/tuya.ai/your_chat_bot/config/SIWX917_AI_DEV_KIT.config` |
+| Switch demo config | `apps/tuya_cloud/switch_demo/config/SIWX917_AI_DEV_KIT.config` |
 
 ## Next Steps
 
-After a successful build:
+### 0. Flash TA firmware (required once per device)
 
-### 0. Flash TA firmware (required, once per device)
-
-**Important:** Before flashing the M4 application firmware, you must flash the TA firmware patch **once** on each new SiWx917 board. Skip this step only if TA with the matching patch is already on the device.
-
-**File:**
-
-```text
-platform/SiWx917/mcu/patch/RS9117_WC_SI.rps
-```
-
-**Tool:** Simplicity Commander (bundled in the platform repo):
-
-```text
-platform/SiWx917/tools/commander/commander
-```
-
-**Example:**
+Before flashing the M4 application firmware, flash the TA firmware patch **once**
+on each new SiWx917 board. Skip only if TA with the matching patch is already on
+the device. Wi-Fi/BLE will not work correctly with this port until it is done.
 
 ```bash
 cd ~/TuyaOpen
@@ -263,33 +207,27 @@ platform/SiWx917/tools/commander/commander flash \
   --device SiWG917M111MGTBA
 ```
 
-Adjust `--device` to match your target part number if it differs. This step is mandatory for Wi-Fi/BLE to work correctly with the TuyaOpen port.
+Adjust `--device` if your target part number differs.
 
 ### 1. Flash M4 application firmware
 
-Use Simplicity Commander to flash the build output from the `your_chat_bot` project.
+Use Simplicity Commander to flash the build output from the app's `dist/` directory.
 
 ### 2. Provision and test
 
-1. **Provision the device** over BLE (see [Notes](#notes))
-2. **Run the chatbot example** and verify Wi-Fi and cloud connectivity
-3. **Customize** the application for your product
+1. Provision the device over BLE (see [Notes](#notes))
+2. Run the example and verify Wi-Fi and cloud connectivity
+3. Keep Release builds for voice apps; Debug can hurt audio real-time performance
 
 ## Notes
 
 ### Network provisioning
 
-On SiWx917, only **BLE provisioning** is supported. Do not use `NETCFG_TUYA_WIFI_AP` or combined `NETCFG_TUYA_BLE | NETCFG_TUYA_WIFI_AP`.
-
-The TuyaOpen v1.6.0 integration patch already sets this in `apps/tuya.ai/your_chat_bot/src/tuya_main.c`:
-
-```c
-#if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
-    netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_NETCFG, &(netcfg_args_t){.type = NETCFG_TUYA_BLE});
-#endif
-```
-
-No manual edit is needed after applying the patch.
+On SiWx917, only **BLE provisioning** works: SoftAP and BLE cannot coexist on this
+chip. The adapter enforces this itself — `tkl_wifi_start_ap()` and
+`tkl_wifi_set_work_mode(WWM_SOFTAP / WWM_STATIONAP)` return `OPRT_NOT_SUPPORTED`
+in STA-only mode, so an app requesting `NETCFG_TUYA_BLE | NETCFG_TUYA_WIFI_AP`
+still provisions over BLE. No application edit is required.
 
 ### Debug task status
 
@@ -312,21 +250,19 @@ void vConfigureTimerForRunTimeStats(void);
 #define portGET_RUN_TIME_COUNTER_VALUE() ulGetRunTimeCounterValue()
 ```
 
-Call `tkl_system_print_task_stats()` from your application (for example in `app_chat_bot.c`) to print task usage.
+Then call `tkl_system_print_task_stats()` from your application.
+
+### Build and porting notes
+
+- Chip vendor SDKs (Simplicity / Wiseconnect) are downloaded by `platform_prepare.py` and pinned in `platform_libsdepend`
+- `build_setup.py` expects the app build directory as the 5th CLI argument (passed by current `tos.py` / `cli_build.py`)
+- AES-GCM uses platform AES via `ENABLE_PLATFORM_AES` + `tal_aes_gcm_*`, with the scratch buffer allocated per call so concurrent TLS sessions cannot corrupt each other; any hardware failure falls back to software mbedtls
+- No-codec playback volume is applied as digital gain in the board's `tdd_audio_no_codec`
+- MP3 playback needs `MP3_DECODER_STATIC_BUF` (selected by the SiWx917 boards). Without it the minimp3 scratch comes from PSRAM via `MP3_MALLOC`, and the per-frame access latency stutters audibly. It trades ~24KB of internal RAM for that and makes decoding single-stream only
+- Large static buffers can use `TUYA_MEM_SECTION_RAM` / `TUYA_MEM_SECTION_PSRAM` (`tuya_mem_section.h`). The section names carry **no** leading dot and the linker scripts must match exactly, or the input section is silently orphaned
+- **Anti-stutter (latest TuyaOpen):** keep large `AI_*_RINGBUF_SIZE` in board config; enable both `ENABLE_EXT_RAM` (AI path) and `CONFIG_SPIRAM` (adapter). Latest defaults (20KB) are too small for voice.
 
 ## Additional Resources
 
-- **TuyaOpen:** https://github.com/tuya/TuyaOpen
-- **TuyaOpen docs:** https://tuyaopen.ai/docs/about-tuyaopen
-- **Environment setup:** https://tuyaopen.ai/docs/quick_start/enviroment-setup
-- **Tuya AI Agent:** https://developer.tuya.com/en/docs/iot/ai-agent-management
-- **SiWx917 platform:** https://github.com/tuya/TuyaOpen-SiliconLabs
-
-## Version Information
-
-| Component | Version |
-|-----------|---------|
-| TuyaOpen | v1.6.0 (`b07b9b2`) |
-| Integration patch | `01_TuyaOpen_v1.6.0.patch` |
-| Platform repo | [TuyaOpen-SiliconLabs](https://github.com/tuya/TuyaOpen-SiliconLabs) |
-| Target board | `SIWX917_AI_DEV_KIT` |
+- [TuyaOpen](https://github.com/tuya/TuyaOpen)
+- [TuyaOpen-SiliconLabs](https://github.com/tuya/TuyaOpen-SiliconLabs)

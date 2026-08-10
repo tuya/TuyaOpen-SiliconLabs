@@ -37,6 +37,7 @@
 #include "tuya_error_code.h"
 #include "tkl_flash.h"
 #include "tkl_log.h"
+#include "tuyaopen_license.h"
 
 // -----------------------------------------------------------------------------
 //                              Macros and Typedefs
@@ -65,7 +66,13 @@
 #define SIMPLE_FLASH_KV_PROTECTED_SIZE 0 // 4K
 #endif
 
-#define LITTLEFS_MEM_SIZE (SIMPLE_FLASH_SIZE + UF_PARTITION_SIZE + SIMPLE_FLASH_KV_PROTECTED_SIZE)
+/*
+ * Must cover KEY + KV + UF (+ protect). V1.6 omitted KEY (PARTITION_SIZE), so
+ * UF's last 4KB sector lands at flash end (0x8400000) and erase returns
+ * SL_STATUS_SI91X_INVALID_CONFIG_RANGE_PROVIDED (0x10063). tal_kv mounts UF.
+ */
+#define LITTLEFS_MEM_SIZE                                                                                              \
+    (PARTITION_SIZE + SIMPLE_FLASH_SIZE + UF_PARTITION_SIZE + SIMPLE_FLASH_KV_PROTECTED_SIZE)
 
 extern char linker_littlefs_begin;
 
@@ -162,6 +169,8 @@ OPERATE_RET tkl_flash_erase(uint32_t addr, uint32_t size)
     sl_status_t status;
     uint32_t    flash_addr = addr + FLASH_LITTLEFS_BASE;
     uint32_t    size_erase = 0;
+    /* WiseConnect erase path ignores payload; keep non-NULL like Silabs LFS HAL */
+    uint8_t     dummy_buff[1] = {0};
 
     if (size % FLASH_SECTOR_SIZE == 0) {
         size_erase = size;
@@ -169,8 +178,13 @@ OPERATE_RET tkl_flash_erase(uint32_t addr, uint32_t size)
         size_erase = (size / FLASH_SECTOR_SIZE + 1) * FLASH_SECTOR_SIZE;
     }
 
+    if (size_erase > 0xFFFFu) {
+        TKL_LOGE("flash e size too large %lu", size_erase);
+        return OPRT_INVALID_PARM;
+    }
+
     TKL_LOGV("flash e %08lx, size %lu, erase size %lu", flash_addr, size, size_erase);
-    status = sl_si91x_command_to_write_common_flash(flash_addr, NULL, size_erase, FLASH_SECTOR_ERASE);
+    status = sl_si91x_command_to_write_common_flash(flash_addr, dummy_buff, (uint16_t)size_erase, FLASH_SECTOR_ERASE);
     if (status != SL_STATUS_OK) {
         TKL_LOGE("flash e error %lx", status);
         return OPRT_COM_ERROR;
@@ -291,4 +305,36 @@ int tuya_iot_license_read(tuya_iot_license_t *license)
 
     return OPRT_OK;
 #endif
+}
+
+/**
+ * @brief Read factory/OTP license JSON blob
+ * @param[out] data allocated buffer holding license JSON (caller frees with tal_free)
+ * @param[out] data_len length of data in bytes
+ * @return OPRT_OK on success, OPRT_NOT_SUPPORTED if OTP license is unavailable
+ * @note SiWx917 has no factory OTP license path yet; use KV auth / tuya_config.h.
+ */
+OPERATE_RET tuyaopen_license_read(CHAR_T **data, UINT32_T *data_len)
+{
+    if (data != NULL) {
+        *data = NULL;
+    }
+    if (data_len != NULL) {
+        *data_len = 0;
+    }
+    return OPRT_NOT_SUPPORTED;
+}
+
+/**
+ * @brief Write factory/OTP license JSON blob
+ * @param[in] data license JSON string
+ * @param[in] data_len length of data in bytes
+ * @return OPRT_OK on success, OPRT_NOT_SUPPORTED if OTP write is unavailable
+ * @note SiWx917 has no factory OTP license path yet; use `auth` CLI (KV).
+ */
+OPERATE_RET tuyaopen_license_write(const CHAR_T *data, UINT32_T data_len)
+{
+    TKL_UNUSED(data);
+    TKL_UNUSED(data_len);
+    return OPRT_NOT_SUPPORTED;
 }

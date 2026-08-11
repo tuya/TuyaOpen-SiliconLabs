@@ -1,0 +1,17 @@
+[
+    {
+        "name": "Simplicity SDK",
+        "path": "sdks/simplicity_sdk",
+        "version": "v2025.6.1",
+        "url": "https://github.com/SiliconLabs/simplicity_sdk",
+        "init_submodule": true
+    },
+    {
+        "name": "Wiseconnect SDK",
+        "path": "sdks/wiseconnect",
+        "version": "v4.0.0-ifc2fc",
+        "url": "https://github.com/SiliconLabs/wiseconnect",
+        "init_submodule": false,
+        "patch": "mcu/patch/wiseconnect.patch"
+    }
+]

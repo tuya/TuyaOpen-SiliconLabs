@@ -1,0 +1,9 @@
+# Properties file for Simplicity Studio metadata
+id=com.silabs.sdk.tuyaopen-si91x
+
+version=0.0.1
+
+label=Silicon Labs tuyaopen-si91x
+description=tuyaopen-si91x extension for Simplicity SDK Suite
+
+prop.subLabel=Silicon Labs tuyaopen-si91x\\ 0.0.1-1.0

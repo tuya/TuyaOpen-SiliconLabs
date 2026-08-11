@@ -1,0 +1,19 @@
+id: sl_tuyaopen_psram_config
+label: SiWx917 Text Segment in PSRAM
+package: platform
+description: >
+  This component puts Text segment in PSRAM memory region and enables execution from PSRAM.
+category: Device|Si91x|MCU|Peripheral|PSRAM Driver|PSRAM Linker Configurations
+quality: experimental
+provides:
+  - name: sl_tuyaopen_psram_config
+
+requires:
+  - name: bss_segment_in_psram
+    from: wiseconnect3_sdk
+  - name: text_segment_in_psram
+    from: wiseconnect3_sdk
+
+define:
+  - name: SL_TUYAOPEN_BSS_SEGMENT_IN_PSRAM
+    value: '1'

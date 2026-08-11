@@ -1,0 +1,114 @@
+project_name: tuyaopen_si91x_template
+label: tuyaopen-si91x
+package: TuyaOpen
+description: This platform project is used to generate a CMake library for SiWx917 SoC
+category: TuyaOpen Examples
+quality: experimental
+
+sdk:
+  id: simplicity_sdk
+  version: 2025.6.1
+sdk_extension:
+  - id: wiseconnect3_sdk
+    version: 4.0.0
+  - id: tuyaopen-si91x
+    version: 0.0.1
+component:
+  # tuyaopen-si91x components
+  - id: sl_si91x_wifi_resources
+    from: tuyaopen-si91x
+  - id: sl_si91x_debug
+    from: tuyaopen-si91x
+  - id: sl_si91x_littlefs
+    from: tuyaopen-si91x
+  - id: sl_si91x_lwip_stack
+    from: tuyaopen-si91x
+  - id: sl_tuyaopen_psram_config
+    from: tuyaopen-si91x
+
+  # Workaround for wiseconnect sdk 4.0.0
+  - id: opn_config
+    from: tuyaopen-si91x
+
+  # SDK components
+  - id: sl_main
+  - id: freertos
+  - id: freertos_heap_4
+  - id: cpp_support
+  - id: emlib_common
+
+  # wiseconnect
+  - id: wiseconnect_common
+    from: wiseconnect3_sdk
+  - id: wifi
+    from: wiseconnect3_sdk
+  - id: ble
+    from: wiseconnect3_sdk
+  - id: basic_network_config_manager
+    from: wiseconnect3_sdk
+  - id: network_manager
+    from: wiseconnect3_sdk
+  - id: si91x_mem_config_3
+    from: wiseconnect3_sdk
+  - id: sl_si91x_basic_buffers
+    from: wiseconnect3_sdk
+  - id: sl_si91x_gcm
+    from: wiseconnect3_sdk
+  - id: sl_si91x_crypto
+    from: wiseconnect3_sdk
+  - id: sl_si91x_crypto_utility
+    from: wiseconnect3_sdk
+  - id: sl_si91x_wrap
+    from: wiseconnect3_sdk
+  - id: cmsis_usart
+    from: wiseconnect3_sdk
+  - id: sl_clock_manager
+    from: wiseconnect3_sdk
+  - id: sl_si91x_soc_soft_reset
+    from: wiseconnect3_sdk
+  - id: sleeptimer_si91x
+    from: wiseconnect3_sdk
+  - id: sl_ulp_timer
+    from: wiseconnect3_sdk
+  - id: sl_gpio
+    from: wiseconnect3_sdk
+  - id: sl_gspi
+    from: wiseconnect3_sdk
+  - instance: [i2s0]
+    from: wiseconnect3_sdk
+    id: i2s_instance
+  - id: sl_ssi
+    from: wiseconnect3_sdk
+  - instance: [primary]
+    from: wiseconnect3_sdk
+    id: sl_ssi_instance
+  - instance: [secondary]
+    from: wiseconnect3_sdk
+    id: sl_ssi_instance
+  - instance: [ulp_primary]
+    from: wiseconnect3_sdk
+    id: sl_ssi_instance
+
+requires:
+- {name: device_needs_ram_execution}
+
+configuration:
+- {name: configTOTAL_HEAP_SIZE, value: '131072'}
+- {name: SL_GSPI_DMA_CONFIG_ENABLE, value: '1'}
+- {name: GSPI_UC, value: '0'}
+
+define:
+  - name: SLI_SI91X_ENABLE_IPV6
+    value: 1
+  - name: SUPPORT_CPLUSPLUS
+    value: 1
+  - name: SLI_SI91X_MCU_MOV_ROM_API_TO_FLASH
+    value: 1
+
+toolchain_settings:
+- {value: -Wall -Werror, option: gcc_compiler_option}
+- {value: -Wno-unused-parameter, option: gcc_compiler_option}
+- {value: -mfp16-format=ieee, option: gcc_compiler_option}
+- {value: -Wno-missing-field-initializers, option: gcc_compiler_option}
+- {value: -u _printf_float, option: gcc_linker_option}
+- {value: debug, option: optimize}

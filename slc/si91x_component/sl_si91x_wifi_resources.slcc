@@ -1,0 +1,23 @@
+id: sl_si91x_wifi_resources
+package: tuyaopen-si91x
+description: >
+    LwIP config.
+
+label: LwIP Network Stack (Hosted)
+category: Device|Si91x|Wireless|Network Stack
+quality: production
+metadata:
+  sbom:
+    license: MSLA
+root_path: "mcu/defaults"
+provides:
+  - name: wifi_resources
+
+config_file:
+- path: sl_wifi_region_db_config.h
+  file_id: sl_wifi_region_db_config
+- path: sl_net_default_values.h
+  file_id: sl_net_default_values
+#- path: lwipopts.h
+#  file_id: lwipopts
+#  condition: ["sl_si91x_lwip_stack"]

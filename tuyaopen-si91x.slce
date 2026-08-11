@@ -1,0 +1,10 @@
+id: tuyaopen-si91x
+version: 0.0.1
+description: "tuyaopen-si91x extension for Simplicity SDK Suite"
+label: "TuyaOpen SiWx917"
+sdk:
+  id: simplicity_sdk
+  version: 2025.6.1
+component_path:
+  - path: slc/si91x_component
+  - path: slc/si91x_component/board/silabs/component

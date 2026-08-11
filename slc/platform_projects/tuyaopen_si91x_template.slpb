@@ -1,0 +1,19 @@
+---
+parameters:
+- name: "build_dir"
+- name: "project_name"
+steps:
+- task: "create_rps"
+  output: "{{build_dir}}/{{project_name}}.rps"
+  input: "{{build_dir}}/{{project_name}}.elf"
+  map: "{{build_dir}}/{{project_name}}.map"
+  app-version: "1"
+- task: "convert"
+  output: "{{build_dir}}/{{project_name}}.hex"
+  input: "{{build_dir}}/{{project_name}}.rps"
+- task: "convert"
+  output: "{{build_dir}}/{{project_name}}.s37"
+  input: "{{build_dir}}/{{project_name}}.rps"
+- task: "convert"
+  output: "{{build_dir}}/{{project_name}}_isp.bin"
+  input: "{{build_dir}}/{{project_name}}.rps"

@@ -1,0 +1,19 @@
+id: sl_si91x_lwip_stack
+package: tuyaopen-si91x
+description: >
+  The LwIP network stack component enables the LwIP network stack on the host MCU.
+
+label: LwIP Network Stack (Hosted)
+category: Device|Si91x|Wireless|Network Stack
+quality: production
+metadata:
+  sbom:
+    license: MSLA
+provides:
+  - name: sl_si91x_lwip_stack
+  - name: sl_si91x_network_stack
+define:
+  - name: SLI_SI91X_LWIP_HOSTED_NETWORK_STACK
+
+requires:
+  - name: sl_si91x_wireless

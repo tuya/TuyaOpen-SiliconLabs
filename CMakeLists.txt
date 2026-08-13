@@ -83,6 +83,18 @@ if(CONFIG_ENABLE_WIFI)
         "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_wifi.c")
     list(APPEND INIT_SRC 
         "${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/init/src/tkl_init_wifi.c")
+
+    # tkl_wifi.c calls dhcps_start/stop/set_new_lease_cb for SoftAP; pull in
+    # lwIP's dhcpserver applet from src/liblwip only when that's needed.
+    # Declared in boards/SiWx917/TKL_Kconfig, not src/liblwip, since no other
+    # platform references these symbols.
+    if(CONFIG_ENABLE_LWIP_DHCPD STREQUAL "y")
+        set(DHCPD_SRC "${CMAKE_SOURCE_DIR}/../../src/liblwip/lwip-2.1.2/src/apps/dhcpserver/dhcpserver.c")
+        list(APPEND WIFI_SRC ${DHCPD_SRC})
+        # Vendor lwIP code isn't written to satisfy this SLC project's
+        # -Wall -Werror; src/liblwip/CMakeLists.txt applies the same -w to it.
+        set_source_files_properties(${DHCPD_SRC} PROPERTIES COMPILE_OPTIONS "-w")
+    endif()
 endif()
 
 if(CONFIG_ENABLE_BLUETOOTH)

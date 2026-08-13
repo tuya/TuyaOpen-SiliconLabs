@@ -482,10 +482,12 @@ static sl_status_t _tkl_wifi_ap_disconnected_event_handler(sl_wifi_event_t event
     return SL_STATUS_OK;
 }
 
+#if defined(ENABLE_LWIP_DHCPD) && (ENABLE_LWIP_DHCPD == 1)
 static void _dhcps_lease_cb(u8_t *client_ip)
 {
     TKL_LOGD("Client lease " IP4STR, IP4TOSTR(client_ip));
 }
+#endif
 
 void _tkl_wifi_ap_linkup(void)
 {
@@ -512,8 +514,10 @@ void _tkl_wifi_ap_linkup(void)
 
     netifapi_netif_set_up(wifi_ap_netif);
     netifapi_netif_set_link_up(wifi_ap_netif);
+#if defined(ENABLE_LWIP_DHCPD) && (ENABLE_LWIP_DHCPD == 1)
     dhcps_set_new_lease_cb(_dhcps_lease_cb);
     dhcps_start(wifi_ap_netif, ipaddr);
+#endif
 }
 
 static void _tkl_wifi_ap_linkdown(void)
@@ -522,7 +526,9 @@ static void _tkl_wifi_ap_linkdown(void)
 
     netifapi_netif_set_down(wifi_ap_netif);
     netifapi_netif_set_link_down(wifi_ap_netif);
+#if defined(ENABLE_LWIP_DHCPD) && (ENABLE_LWIP_DHCPD == 1)
     dhcps_stop(wifi_ap_netif);
+#endif
 }
 
 #if LWIP_NETIF_EXT_STATUS_CALLBACK

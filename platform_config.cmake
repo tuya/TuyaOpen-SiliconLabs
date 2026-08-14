@@ -14,6 +14,25 @@ set(PLATFORM_PUBINC
 # Add global definition for SLI_SI917B0 macro
 add_definitions(-DSLI_SI917B0)
 
+# The MP3 decoder's scratch buffer is rewritten throughout every frame; this
+# board's general purpose heap is in PSRAM (see tkl_memory.c), which can't
+# keep up. Point the decoder's MP3_MALLOC/MP3_FREE hooks
+# (src/audio_player/.../minimp3.h) at a dedicated internal-RAM pool
+# (mcu/src/mp3_internal_pool.c, added to the link in ./CMakeLists.txt) instead
+# of the default ENABLE_EXT_RAM-based allocator.
+#
+# Must be defined here, not in ./CMakeLists.txt: the same -D added there
+# compiled decoder_mp3.c.obj against tal_psram_malloc regardless (verified via
+# nm), i.e. it never reached src/'s compile flags, only this platform's own
+# adapter sources. This file is include()d from the root CMakeLists.txt before
+# add_subdirectory(src/...), which does reach it (same place SLI_SI917B0
+# below is defined, and where the file already generates the SLC project
+# before src/ needs its output).
+if(CONFIG_MP3_DECODER_STATIC_BUF STREQUAL "y")
+    add_definitions(-DMP3_MALLOC=mp3_internal_malloc
+                    -DMP3_FREE=mp3_internal_free)
+endif()
+
 set(CMAKE_BUILD_TYPE Release)
 
 # WARNING: Changing CMAKE_BUILD_TYPE from Release to Debug may significantly impact

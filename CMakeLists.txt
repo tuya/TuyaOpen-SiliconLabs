@@ -75,7 +75,13 @@ set(ADAPTER_SRC
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_display.c"
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_symmetry.c"
 )
-        
+
+# See platform_config.cmake for why MP3_MALLOC/MP3_FREE point here: this just
+# adds the object file to the final link.
+if(CONFIG_MP3_DECODER_STATIC_BUF STREQUAL "y")
+    list(APPEND ADAPTER_SRC "${CMAKE_SOURCE_DIR}/mcu/src/mp3_internal_pool.c")
+endif()
+
 set(INIT_SRC "${CMAKE_SOURCE_DIR}/tuyaos_adapter/include/init/src/tkl_init_common.c")
 
 if(CONFIG_ENABLE_WIFI)

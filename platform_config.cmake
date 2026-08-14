@@ -26,8 +26,24 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
                     "Consider using Release build for voice-enabled applications.")
 endif()
 
+# Generate the SLC project. Driven from here rather than through tos.py's
+# build_setup hook because the only extra thing the generator needs is the app
+# build directory, which CMake already has as CMAKE_CURRENT_BINARY_DIR; routing
+# it through tos.py would mean adding a fifth positional argument to a
+# build_setup signature that every platform shares. Re-running is cheap:
+# script/generate skips an output dir that already exists.
+execute_process(
+    COMMAND ${CMAKE_COMMAND} -E env python slc_generate.py
+            "${CONFIG_PROJECT_NAME}" "${CMAKE_CURRENT_BINARY_DIR}"
+    WORKING_DIRECTORY "${PLATFORM_PATH}"
+    RESULT_VARIABLE SLC_GENERATE_RESULT)
+
+if(NOT SLC_GENERATE_RESULT EQUAL 0)
+    message(FATAL_ERROR "[Platform] slc_generate.py failed (${SLC_GENERATE_RESULT})")
+endif()
+
 # Use auto-generated include directories from SLC
-# This file is created by build_setup.py after SLC generation with full absolute paths
+# This file is created by slc_generate.py after SLC generation with full absolute paths
 set(SLC_INCLUDES_FILE "${CMAKE_CURRENT_BINARY_DIR}/slc_includes.cmake")
 
 if(EXISTS "${SLC_INCLUDES_FILE}")

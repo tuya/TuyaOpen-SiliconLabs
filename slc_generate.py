@@ -384,19 +384,19 @@ def generate(project_name, build_param_path):
 
 
 def main():
-    if len(sys.argv) < 6:
-        print(f"Error: At least 5 parameters are needed {sys.argv}.")
+    '''
+    Invoked from platform_config.cmake, not from tos.py: CMake already knows
+    the app build directory as CMAKE_CURRENT_BINARY_DIR, so it can hand it over
+    directly. Going through tos.py's build_setup hook would mean adding a fifth
+    positional argument to a signature shared by every platform.
+    '''
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <project_name> <build_dir>")
         sys.exit(1)
     project_name = sys.argv[1]
-    platform = sys.argv[2]
-    framework = sys.argv[3]
-    chip = sys.argv[4]
-    builddir = sys.argv[5]
-    print("================== build_setup ==================")
-    print(f'''project_name: ${project_name}
-platform: {platform}
-framework: {framework}
-chip: {chip}
+    builddir = sys.argv[2]
+    print("================== slc_generate ==================")
+    print(f'''project_name: {project_name}
 builddir: {builddir}
 ''')
 

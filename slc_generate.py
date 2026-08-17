@@ -14,6 +14,19 @@ try:
 except ImportError:
     kconfig2slcp = None
 
+
+def to_posix_path(path):
+    '''
+    Rewrite a path with forward slashes before handing it to the bash helpers.
+
+    script/generate runs under bash, and run_slc evals its command line -- where
+    a backslash is an escape character, not a separator. os.path.join produces
+    backslashes on Windows, so ".build\\tuyaopen_x.slcp" reaches slc as
+    ".buildtuyaopen_x.slcp" and the project fails to load. Windows accepts
+    forward slashes in every API we go through, so normalize on the way out.
+    '''
+    return path.replace(os.sep, "/") if os.sep != "/" else path
+
 mbr_note = """IMPORTANT: When changing M4 Flash Size, you must update the MBR (Master Boot Record)
 Run the following commands to write the new MBR configuration to your SiWx917 device:
 
@@ -362,8 +375,8 @@ def generate(project_name, build_param_path):
             print(f"Warning: Failed to convert kconfig to slcp: {e}")
 
     slc_generated_projects_dir = os.path.join(build_param_path, "slc")
-    if run_shell_script("./script/generate", slcp_dst,
-                        slc_generated_projects_dir, board) != 0:
+    if run_shell_script("./script/generate", to_posix_path(slcp_dst),
+                        to_posix_path(slc_generated_projects_dir), board) != 0:
         print(f"Failed to generate {project_name}")
         return False
 

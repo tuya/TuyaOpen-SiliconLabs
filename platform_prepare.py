@@ -8,7 +8,7 @@ import subprocess
 
 from script.util import (
     rm_rf, copy_file,
-    do_subprocess, do_subprocess_argv, run_shell_script,
+    do_subprocess_argv, run_shell_script,
     get_system_name
 )
 
@@ -275,8 +275,7 @@ def download_sdk(root, prepare_file, prepare_libs):
                 "--depth=1",
                 dest_path,
             ]
-            cmd = " ".join(cmds)
-            if do_subprocess(cmd) != 0:
+            if do_subprocess_argv(cmds) != 0:
                 print(f"Failed to clone {name}")
                 return False
         else:
@@ -287,9 +286,7 @@ def download_sdk(root, prepare_file, prepare_libs):
                 "--hard",
                 version
             ]
-            cmd = " ".join(cmds)
-            git_cmd = f"cd {dest_path} && {cmd}"
-            if do_subprocess(git_cmd) != 0:
+            if do_subprocess_argv(cmds, cwd=dest_path) != 0:
                 print(f"Failed to checkout {version} for {name}")
                 return False
         # Init submodule
@@ -301,9 +298,7 @@ def download_sdk(root, prepare_file, prepare_libs):
                 "--init",
                 "--recursive",
             ]
-            cmd = " ".join(cmds)
-            git_cmd = f"cd {dest_path} && {cmd}"
-            if do_subprocess(git_cmd) != 0:
+            if do_subprocess_argv(cmds, cwd=dest_path) != 0:
                 print(f"Failed to update submodules for {name}")
                 return False
         # Apply Patch
@@ -315,9 +310,7 @@ def download_sdk(root, prepare_file, prepare_libs):
                     "apply",
                     patch_file,
                 ]
-                cmd = " ".join(cmds)
-                git_cmd = f"cd {dest_path} && {cmd}"
-                if do_subprocess(git_cmd) != 0:
+                if do_subprocess_argv(cmds, cwd=dest_path) != 0:
                     print(f"Failed to apply patch for {name}")
                     return False
         _normalize_slce_line_endings(dest_path)

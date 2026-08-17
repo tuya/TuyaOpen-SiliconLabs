@@ -69,7 +69,7 @@ trust_sdk_and_extensions()
     set -x
 
     # Trust the Simplicity SDK submodule
-    run_slc -v 1 signature trust --sdk "${sdk_dir}" -data "${tuyaopen_slc_data}"
+    run_slc -v INFO signature trust --sdk "${sdk_dir}" -data "${tuyaopen_slc_data}"
 
     # Ensure SDK extension folder exists
     mkdir -p "${sdk_dir}/extension"
@@ -118,7 +118,7 @@ trust_sdk_and_extensions()
             link_dir "${extension_dir}" "${extension_symlink}"
 
             # Trust the extension (extpath must be under the same real sdk_dir)
-            run_slc -v 1 signature trust --sdk "${sdk_dir}" -extpath "${extension_symlink}" -data "${tuyaopen_slc_data}"
+            run_slc -v INFO signature trust --sdk "${sdk_dir}" -extpath "${extension_symlink}" -data "${tuyaopen_slc_data}"
         done
     done
 
@@ -241,7 +241,7 @@ generate()
 
     trust_sdk_and_extensions
 
-    run_slc -v 1 generate \
+    run_slc -v INFO generate \
         -data "${tuyaopen_slc_data?}" \
         --cache-home "${build_dir}/slc/slcc_components.cache" \
         --sdk="${sdk_dir?}" \

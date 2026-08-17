@@ -144,7 +144,10 @@ patch_linkerfile()
 
     echo "======================================================================"
     echo "Convert linker file *.o -> *.c.obj"
-    sed -i '/crtbegin/! {/crtend/! s/\.o/\.c.obj/g; }' $linker_file
+    # Not `sed -i`: GNU takes no argument to -i while BSD sed (macOS) requires
+    # one, so there is no spelling that works on both. Redirect instead.
+    sed '/crtbegin/! {/crtend/! s/\.o/\.c.obj/g; }' "$linker_file" > "${linker_file}.tmp" \
+        && mv "${linker_file}.tmp" "$linker_file"
     # sed -i 's|\*heap_.*\.c.obj)|\*heap_.*\.c.obj \*USART.c.obj \*uart\* \*usart\*)|g' $linker_file
     # sed -i '/\*heap_\*.c.obj(.text\*)/a\
     # *USART.c.obj(.text*)\

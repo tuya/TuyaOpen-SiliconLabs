@@ -13,6 +13,9 @@ fi
 script_dir="$(realpath "$(dirname "${script_path}")")"
 repo_dir="$(dirname "${script_dir}")"
 
+# download_file, die
+source "${script_dir}/util"
+
 # ==============================================================================
 install_packages_apt()
 {
@@ -140,8 +143,35 @@ do_bootstrap_silabs()
 
 install_arm_toolchain()
 {
-    local url=${1-"https://developer.arm.com/-/media/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-arm-none-eabi.tar.xz"}
-    local extract_dir=${2-"arm-gnu-toolchain-12.2.rel1-x86_64-arm-none-eabi"}
+    # ARM publishes one archive per host triple and the wrong one simply will
+    # not execute. Names verified against developer.arm.com for 12.2.rel1:
+    #   Linux x86_64        -> x86_64            .tar.xz
+    #   macOS Intel         -> darwin-x86_64     .tar.xz
+    #   macOS Apple silicon -> darwin-arm64      .tar.xz
+    #   Windows             -> mingw-w64-i686    .zip     (note: not a tarball)
+    local host archive_ext
+    case "$(uname -s)" in
+        Darwin)
+            if [ "$(uname -m)" = "arm64" ]; then
+                host="darwin-arm64"
+            else
+                host="darwin-x86_64"
+            fi
+            archive_ext="tar.xz"
+            ;;
+        MINGW* | MSYS* | CYGWIN*)
+            host="mingw-w64-i686"
+            archive_ext="zip"
+            ;;
+        *)
+            host="x86_64"
+            archive_ext="tar.xz"
+            ;;
+    esac
+    local release="arm-gnu-toolchain-12.2.rel1-${host}-arm-none-eabi"
+
+    local url=${1-"https://developer.arm.com/-/media/Files/downloads/gnu/12.2.rel1/binrel/${release}.${archive_ext}"}
+    local extract_dir=${2-"${release}"}
     local toolchain_dir=${3-""}
 
     # If toolchain_dir is not provided, use /opt if root, else use ~/.local
@@ -159,12 +189,26 @@ install_arm_toolchain()
     echo 'Installing GNU ARM Embedded Toolchain...'
 
     # Download
-    local tarball=gcc-arm.tar.xz
+    local tarball="gcc-arm.${archive_ext}"
     mkdir -p "${toolchain_dir}/${extract_dir}"
-    wget --tries 4 --no-check-certificate --quiet "${url}" -O "${toolchain_dir}/${tarball}"
+    download_file "${url}" "${toolchain_dir}/${tarball}"
 
-    # Extract
-    tar xf "${toolchain_dir}/${tarball}" --directory "${toolchain_dir}/${extract_dir}" --strip-components=1
+    # Extract. The Windows build ships as a zip, which has no --strip-components
+    # equivalent, so flatten the single top-level directory afterwards instead.
+    if [ "${archive_ext}" = "zip" ]; then
+        local staging="${toolchain_dir}/.unzip-${extract_dir}"
+        rm -rf "${staging}"
+        extract_zip "${toolchain_dir}/${tarball}" "${staging}"
+        local inner
+        inner=$(find "${staging}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+        if [ -z "${inner}" ]; then
+            die "unexpected layout inside ${tarball}"
+        fi
+        cp -R "${inner}/." "${toolchain_dir}/${extract_dir}/"
+        rm -rf "${staging}"
+    else
+        tar xf "${toolchain_dir}/${tarball}" --directory "${toolchain_dir}/${extract_dir}" --strip-components=1
+    fi
 
     # Link if root
     if [ "$EUID" -eq 0 ]; then

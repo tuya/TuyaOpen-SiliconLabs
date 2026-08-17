@@ -13,69 +13,33 @@ fi
 script_dir="$(realpath "$(dirname "${script_path}")")"
 repo_dir="$(dirname "${script_dir}")"
 
+# download_file, host_arch_tag, die
+source "${script_dir}/util"
+
 # ==============================================================================
-
-# unzip is not guaranteed: the CI runner has none, and script/bootstrap now
-# skips the apt install that would provide one when sudo needs a password.
-# Python is always there -- tos.py itself runs on it -- but zipfile.extract
-# drops the Unix mode bits, and slc and commander have to come out executable,
-# so put them back from the archive entry.
-extract_zip()
-{
-    local zip_file="$1"
-    local dest_dir="$2"
-
-    if command -v unzip > /dev/null 2>&1; then
-        unzip -q -o "${zip_file}" -d "${dest_dir}"
-        return
-    fi
-
-    local py=""
-    local candidate
-    for candidate in python3 python; do
-        if command -v "${candidate}" > /dev/null 2>&1; then
-            py="${candidate}"
-            break
-        fi
-    done
-    if [ -z "${py}" ]; then
-        echo " ** ERROR: need either unzip or python to extract ${zip_file}" >&2
-        exit 1
-    fi
-
-    echo "unzip not found, extracting ${zip_file} with ${py}"
-    "${py}" - "${zip_file}" "${dest_dir}" << 'PY'
-import os
-import sys
-import zipfile
-
-archive, dest = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(archive) as zf:
-    for entry in zf.infolist():
-        path = zf.extract(entry, dest)
-        mode = (entry.external_attr >> 16) & 0o777
-        if mode:
-            os.chmod(path, mode)
-PY
-}
 
 install_slc_cli()
 {
     [ -n "${SLC_INSTALL_DIR-}" ] || SLC_INSTALL_DIR="${repo_dir}/tools/slc"
 
-    # Install slc-cli
+    # Install slc-cli. All three names verified to serve a zip on silabs.com.
     local os_type
     if [[ $OSTYPE == "linux"* ]]; then
         os_type="linux"
     elif [[ $OSTYPE == "darwin"* ]]; then
         os_type="mac"
+    elif [[ $OSTYPE == "msys"* || $OSTYPE == "cygwin"* || $OSTYPE == "win32" ]]; then
+        os_type="windows"
+    else
+        echo " ** ERROR: no slc-cli build for OSTYPE=${OSTYPE}" >&2
+        exit 1
     fi
 
     local zip_url="https://www.silabs.com/documents/login/software/slc_cli_${os_type}.zip"
     mkdir -p "${SLC_INSTALL_DIR}"
     pushd "${SLC_INSTALL_DIR}"
     local zip_path="./slc_cli.zip"
-    wget "${zip_url}" -O "${zip_path}"
+    download_file "${zip_url}" "${zip_path}"
     extract_zip "${zip_path}" "$(dirname ${zip_path})" && rm "${zip_path}"
     popd
 
@@ -99,24 +63,73 @@ install_commander()
     [ -n "${COMMANDER_INSTALL_DIR-}" ] || COMMANDER_INSTALL_DIR="${repo_dir}/tools/commander"
 
     # Install Commander
-    local os_type
+    # The outer zip is per-OS; inside it sits one archive per host
+    # architecture, so both have to be selected or the wrong binaries get
+    # installed. Verified against silabs.com: Linux and Windows publish an
+    # outer zip, macOS returns 404 at this URL pattern.
+    local os_type inner_platform
     if [[ $OSTYPE == "linux"* ]]; then
         os_type="Linux"
+        inner_platform="linux_$(host_arch_tag)"
+    elif [[ $OSTYPE == "msys"* || $OSTYPE == "cygwin"* || $OSTYPE == "win32" ]]; then
+        os_type="Windows"
+        inner_platform="win32_x64"
     elif [[ $OSTYPE == "darwin"* ]]; then
-        os_type="mac"
+        echo " ** ERROR: Silicon Labs does not publish Simplicity Commander for" >&2
+        echo "    macOS at https://www.silabs.com/documents/login/software/" >&2
+        echo "    (SimplicityCommander-mac.zip returns 404). Install it by hand" >&2
+        echo "    into ${COMMANDER_INSTALL_DIR} -- building does not need it," >&2
+        echo "    only flashing does." >&2
+        exit 1
+    else
+        echo " ** ERROR: Simplicity Commander install is not supported on OSTYPE=${OSTYPE}" >&2
+        exit 1
     fi
 
     local zip_url="https://www.silabs.com/documents/login/software/SimplicityCommander-${os_type}.zip"
     mkdir -p "${COMMANDER_INSTALL_DIR}"
     pushd "${COMMANDER_INSTALL_DIR}"
-    local zip_path="./commander.zip"
-    wget "${zip_url}" -O "${zip_path}"
-    extract_zip "${zip_path}" "$(dirname ${zip_path})" && rm "${zip_path}"
-    commander_tar_bz=$(find SimplicityCommander-Linux/ -name 'Commander_linux_x86_64_*.tar.bz' | head -n 1)
-    if [[ -n "$commander_tar_bz" ]]; then
-        tar -xjf "$commander_tar_bz" -C ..
+
+    local staging="./.staging"
+    rm -rf "${staging}"
+    mkdir -p "${staging}"
+
+    local zip_path="${staging}/commander.zip"
+    download_file "${zip_url}" "${zip_path}"
+    extract_zip "${zip_path}" "${staging}" && rm "${zip_path}"
+
+    # Pick this host's archive by name. Globbing without the platform tag would
+    # match any of the six variants Linux ships and install, say, an aarch32
+    # build on x86_64.
+    local nested
+    nested=$(find "${staging}" \( -name "Commander_${inner_platform}_*.tar.bz*" \
+        -o -name "Commander_${inner_platform}_*.zip" \) | head -n 1)
+    if [ -z "${nested}" ]; then
+        echo " ** ERROR: no Commander_${inner_platform}_* archive inside ${zip_url}" >&2
+        echo "    extracted contents were:" >&2
+        find "${staging}" -maxdepth 2 >&2
+        exit 1
     fi
-    rm -r SimplicityCommander-Linux
+
+    # Unpack into the staging area, then lift the contents up: the archive's own
+    # top-level folder is named differently on every platform ("commander" on
+    # Linux, "Simplicity Commander" on Windows), so extracting in place would
+    # scatter the binaries to a different path per OS.
+    local inner="${staging}/unpacked"
+    mkdir -p "${inner}"
+    case "${nested}" in
+        *.tar.bz*) tar -xjf "${nested}" -C "${inner}" ;;
+        *.zip) extract_zip "${nested}" "${inner}" ;;
+    esac
+
+    local top
+    top=$(find "${inner}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+    if [ -z "${top}" ]; then
+        echo " ** ERROR: unexpected layout inside $(basename "${nested}")" >&2
+        exit 1
+    fi
+    cp -R "${top}/." .
+    rm -rf "${staging}"
     popd
 }
 

@@ -89,6 +89,24 @@ install_packages()
     elif command -v brew; then
         PM=brew
     fi
+
+    # Only the apt path needs root. Where sudo cannot run unattended -- CI
+    # runners, locked-down workstations -- `sudo apt-get` stops on a password
+    # prompt nobody can answer, and under `set -e` that aborts bootstrap before
+    # it ever reaches the toolchain install. Those images already carry these
+    # packages, so an unusable sudo is a reason to skip this step, not to fail.
+    if [ "${PM}" = "apt" ] && ! sudo -n true 2> /dev/null; then
+        set +x
+        echo ""
+        echo "Skipping system package install: sudo is not available without a password."
+        echo "Install these by hand if a later step reports one missing:"
+        echo "  openjdk (17+), git, git-lfs, ninja-build, unzip, wget or curl,"
+        echo "  xz-utils, bzip2, ccache, coreutils"
+        echo ""
+        set -x
+        return 0
+    fi
+
     install_packages_$PM
 }
 

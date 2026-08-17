@@ -93,15 +93,35 @@ install_packages()
     # Only the apt path needs root. Where sudo cannot run unattended -- CI
     # runners, locked-down workstations -- `sudo apt-get` stops on a password
     # prompt nobody can answer, and under `set -e` that aborts bootstrap before
-    # it ever reaches the toolchain install. Those images already carry these
-    # packages, so an unusable sudo is a reason to skip this step, not to fail.
+    # it ever reaches the toolchain install.
+    #
+    # Skipping the step is usually right, since such an image normally already
+    # carries these packages. But skipping blindly trades one clear failure for
+    # a confusing one much later: without java, for instance, nothing breaks
+    # until slc runs, twenty minutes into the build. So check what the rest of
+    # the bootstrap actually needs and report anything missing up front. unzip
+    # is not in the list -- bootstrap_silabs falls back to python for zips.
     if [ "${PM}" = "apt" ] && ! sudo -n true 2> /dev/null; then
+        local missing=""
+        local tool
+        for tool in java git tar bzip2 xz python3; do
+            command -v "${tool}" > /dev/null 2>&1 || missing="${missing} ${tool}"
+        done
+        if ! command -v curl > /dev/null 2>&1 && ! command -v wget > /dev/null 2>&1; then
+            missing="${missing} curl-or-wget"
+        fi
+
         set +x
         echo ""
         echo "Skipping system package install: sudo is not available without a password."
-        echo "Install these by hand if a later step reports one missing:"
-        echo "  openjdk (17+), git, git-lfs, ninja-build, unzip, wget or curl,"
-        echo "  xz-utils, bzip2, ccache, coreutils"
+        if [ -n "${missing}" ]; then
+            echo ""
+            echo " ** ERROR: the bootstrap cannot continue -- missing:${missing}"
+            echo "    Install them, or run this script somewhere sudo works."
+            echo ""
+            exit 1
+        fi
+        echo "Everything the bootstrap needs is already present."
         echo ""
         set -x
         return 0

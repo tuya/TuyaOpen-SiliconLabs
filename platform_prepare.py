@@ -8,7 +8,7 @@ import subprocess
 
 from script.util import (
     rm_rf, copy_file,
-    do_subprocess, get_system_name
+    do_subprocess, do_subprocess_argv, get_system_name
 )
 
 
@@ -194,19 +194,24 @@ def _ensure_jinja2(root):
             seen.add(p)
             uniq.append(p)
 
+    # Argument lists, not command strings: the interpreter path holds spaces on
+    # Windows ("C:\\Users\\...\\.venv\\Scripts\\python.exe") and quoting it inside
+    # a string that cmd.exe then re-parses breaks the command apart. See
+    # do_subprocess_argv in script/util.py.
     for py in uniq:
-        check = f'"{py}" -c "import jinja2"'
-        if do_subprocess(check) == 0:
+        check = [py, "-c", "import jinja2"]
+        if do_subprocess_argv(check) == 0:
             continue
         print(f"Jinja2 missing in {py}; installing ...")
         # Prefer ensurepip+pip on that exact interpreter
-        do_subprocess(f'"{py}" -m ensurepip --upgrade')
-        if do_subprocess(f'"{py}" -m pip install "Jinja2~=3.1.2"') != 0:
+        do_subprocess_argv([py, "-m", "ensurepip", "--upgrade"])
+        if do_subprocess_argv([py, "-m", "pip", "install", "Jinja2~=3.1.2"]) != 0:
             # Fallback for uv-managed envs without pip module
-            if do_subprocess(f'uv pip install --python "{py}" "Jinja2~=3.1.2"') != 0:
+            if do_subprocess_argv(
+                    ["uv", "pip", "install", "--python", py, "Jinja2~=3.1.2"]) != 0:
                 print(f"ERROR: Failed to install Jinja2 for {py}")
                 return False
-        if do_subprocess(check) != 0:
+        if do_subprocess_argv(check) != 0:
             print(f"ERROR: Jinja2 still missing for {py}")
             return False
     return True

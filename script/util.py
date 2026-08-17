@@ -4,6 +4,7 @@
 import os
 import platform
 import shutil
+import subprocess
 import requests
 from git import Git
 
@@ -74,6 +75,34 @@ def do_subprocess(cmd: str) -> int:
         return 1
     return ret
 
+
+
+def do_subprocess_argv(argv) -> int:
+    '''
+    Run a command given as an argument list, without going through a shell.
+
+    do_subprocess() runs os.system(), which on Windows hands the string to
+    cmd.exe. When the line both starts with a quote and contains more quotes,
+    cmd.exe strips the outermost pair, so
+
+        "C:\\...\\python.exe" -c "import jinja2"
+
+    arrives split in the wrong place and fails. Passing the arguments as a
+    list avoids quoting rules entirely, on every OS.
+
+    return: 0: success, other: error
+    '''
+    if not argv:
+        print("Subprocess argv is empty.")
+        return 0
+
+    print("do subprocess: " + " ".join(str(a) for a in argv))
+
+    try:
+        return subprocess.run([str(a) for a in argv]).returncode
+    except OSError as e:
+        print(f"Do subprocess error: {str(e)}")
+        return 1
 
 
 def need_settarget(target_file, target):

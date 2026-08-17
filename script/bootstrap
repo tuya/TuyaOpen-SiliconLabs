@@ -13,6 +13,9 @@ fi
 script_dir="$(realpath "$(dirname "${script_path}")")"
 repo_dir="$(dirname "${script_dir}")"
 
+# download_file, die
+source "${script_dir}/util"
+
 # ==============================================================================
 install_packages_apt()
 {
@@ -90,36 +93,57 @@ install_packages()
         PM=brew
     fi
 
-    # Only the apt path needs root. Where sudo cannot run unattended -- CI
-    # runners, locked-down workstations -- `sudo apt-get` stops on a password
-    # prompt nobody can answer, and under `set -e` that aborts bootstrap before
-    # it ever reaches the toolchain install.
+    # Two situations where nothing can be installed here:
+    #   - no package manager at all (Windows under Git Bash leaves PM=source,
+    #     and install_packages_source just fails)
+    #   - apt but sudo wants a password, as on a CI runner; `sudo apt-get`
+    #     then blocks on a prompt nobody answers and `set -e` tears the whole
+    #     bootstrap down before it reaches the toolchain install
     #
-    # Skipping the step is usually right, since such an image normally already
-    # carries these packages. But skipping blindly only moves the failure much
-    # later, to an error that says nothing about the cause, so check what the
-    # rest of the bootstrap actually needs and report anything missing up front.
-    #
-    # Two are deliberately absent from the list: unzip, because
-    # bootstrap_silabs falls back to python for zip archives, and java, because
-    # install_jre fetches a JRE when the host has none.
-    if [ "${PM}" = "apt" ] && ! sudo -n true 2> /dev/null; then
+    # Carrying on is usually right, since those hosts normally already have
+    # what is needed. But carrying on blindly only moves the failure to an
+    # error that says nothing about the cause, so check what the rest of the
+    # bootstrap actually uses and stop here naming anything absent.
+    local skip_reason=""
+    if [ "${PM}" = "source" ]; then
+        skip_reason="no supported package manager on this host"
+    elif [ "${PM}" = "apt" ] && ! sudo -n true 2> /dev/null; then
+        skip_reason="sudo is not available without a password"
+    fi
+
+    if [ -n "${skip_reason}" ]; then
+        # Archive tools differ by host: Windows takes both the toolchain and
+        # the nested Commander build as zips, so it needs neither xz nor bzip2.
+        #
+        # Two tools are on no list: unzip, because script/util falls back to
+        # python for zip archives, and java, because install_jre fetches a JRE
+        # when the host has none.
+        local required
+        case "$(uname -s)" in
+            MINGW* | MSYS* | CYGWIN*) required="git" ;;
+            *) required="git tar bzip2 xz" ;;
+        esac
+
         local missing=""
         local tool
-        for tool in git tar bzip2 xz python3; do
+        for tool in ${required}; do
             command -v "${tool}" > /dev/null 2>&1 || missing="${missing} ${tool}"
         done
+        # Either spelling will do; the Windows venv ships python.exe only.
+        if ! command -v python3 > /dev/null 2>&1 && ! command -v python > /dev/null 2>&1; then
+            missing="${missing} python"
+        fi
         if ! command -v curl > /dev/null 2>&1 && ! command -v wget > /dev/null 2>&1; then
             missing="${missing} curl-or-wget"
         fi
 
         set +x
         echo ""
-        echo "Skipping system package install: sudo is not available without a password."
+        echo "Skipping system package install: ${skip_reason}."
         if [ -n "${missing}" ]; then
             echo ""
             echo " ** ERROR: the bootstrap cannot continue -- missing:${missing}"
-            echo "    Install them, or run this script somewhere sudo works."
+            echo "    Install them and run this again."
             echo ""
             exit 1
         fi
@@ -140,8 +164,35 @@ do_bootstrap_silabs()
 
 install_arm_toolchain()
 {
-    local url=${1-"https://developer.arm.com/-/media/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-arm-none-eabi.tar.xz"}
-    local extract_dir=${2-"arm-gnu-toolchain-12.2.rel1-x86_64-arm-none-eabi"}
+    # ARM publishes one archive per host triple and the wrong one simply will
+    # not execute. Names verified against developer.arm.com for 12.2.rel1:
+    #   Linux x86_64        -> x86_64            .tar.xz
+    #   macOS Intel         -> darwin-x86_64     .tar.xz
+    #   macOS Apple silicon -> darwin-arm64      .tar.xz
+    #   Windows             -> mingw-w64-i686    .zip     (note: not a tarball)
+    local host archive_ext
+    case "$(uname -s)" in
+        Darwin)
+            if [ "$(uname -m)" = "arm64" ]; then
+                host="darwin-arm64"
+            else
+                host="darwin-x86_64"
+            fi
+            archive_ext="tar.xz"
+            ;;
+        MINGW* | MSYS* | CYGWIN*)
+            host="mingw-w64-i686"
+            archive_ext="zip"
+            ;;
+        *)
+            host="x86_64"
+            archive_ext="tar.xz"
+            ;;
+    esac
+    local release="arm-gnu-toolchain-12.2.rel1-${host}-arm-none-eabi"
+
+    local url=${1-"https://developer.arm.com/-/media/Files/downloads/gnu/12.2.rel1/binrel/${release}.${archive_ext}"}
+    local extract_dir=${2-"${release}"}
     local toolchain_dir=${3-""}
 
     # If toolchain_dir is not provided, use /opt if root, else use ~/.local
@@ -159,12 +210,26 @@ install_arm_toolchain()
     echo 'Installing GNU ARM Embedded Toolchain...'
 
     # Download
-    local tarball=gcc-arm.tar.xz
+    local tarball="gcc-arm.${archive_ext}"
     mkdir -p "${toolchain_dir}/${extract_dir}"
-    wget --tries 4 --no-check-certificate --quiet "${url}" -O "${toolchain_dir}/${tarball}"
+    download_file "${url}" "${toolchain_dir}/${tarball}"
 
-    # Extract
-    tar xf "${toolchain_dir}/${tarball}" --directory "${toolchain_dir}/${extract_dir}" --strip-components=1
+    # Extract. The Windows build ships as a zip, which has no --strip-components
+    # equivalent, so flatten the single top-level directory afterwards instead.
+    if [ "${archive_ext}" = "zip" ]; then
+        local staging="${toolchain_dir}/.unzip-${extract_dir}"
+        rm -rf "${staging}"
+        extract_zip "${toolchain_dir}/${tarball}" "${staging}"
+        local inner
+        inner=$(find "${staging}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+        if [ -z "${inner}" ]; then
+            die "unexpected layout inside ${tarball}"
+        fi
+        cp -R "${inner}/." "${toolchain_dir}/${extract_dir}/"
+        rm -rf "${staging}"
+    else
+        tar xf "${toolchain_dir}/${tarball}" --directory "${toolchain_dir}/${extract_dir}" --strip-components=1
+    fi
 
     # Link if root
     if [ "$EUID" -eq 0 ]; then
@@ -225,15 +290,11 @@ install_jre()
     rm -rf "${staging}"
     mkdir -p "${staging}"
 
-    if command -v curl > /dev/null 2>&1; then
-        curl -fL --retry 4 --progress-bar -o "${archive}" "${url}"
-    else
-        wget --tries 4 "${url}" -O "${archive}"
-    fi
+    download_file "${url}" "${archive}"
 
     case "${ext}" in
         tar.gz) tar xzf "${archive}" -C "${staging}" ;;
-        zip) unzip -q -o "${archive}" -d "${staging}" ;;
+        zip) extract_zip "${archive}" "${staging}" ;;
     esac
 
     # The archive holds one top-level jdk-17.x.y+z-jre directory; lift its

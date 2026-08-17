@@ -40,3 +40,75 @@ die()
     echo " ** ERROR: $1"
     exit 1
 }
+
+# wget is absent from a stock macOS and from a Windows shell, curl is present on
+# both (and on every modern Linux), so use whichever exists instead of requiring
+# one particular tool.
+download_file()
+{
+    local url="$1"
+    local dest="$2"
+
+    if command -v curl > /dev/null 2>&1; then
+        curl -fL --retry 4 --progress-bar -o "${dest}" "${url}"
+    elif command -v wget > /dev/null 2>&1; then
+        wget --tries 4 "${url}" -O "${dest}"
+    else
+        die "neither curl nor wget is available to download ${url}"
+    fi
+}
+
+# unzip is not guaranteed: the CI runner has none, and script/bootstrap now
+# skips the apt install that would provide one when sudo needs a password.
+# Python is always there -- tos.py itself runs on it -- but zipfile.extract
+# drops the Unix mode bits, and slc and commander have to come out executable,
+# so put them back from the archive entry.
+extract_zip()
+{
+    local zip_file="$1"
+    local dest_dir="$2"
+
+    if command -v unzip > /dev/null 2>&1; then
+        unzip -q -o "${zip_file}" -d "${dest_dir}"
+        return
+    fi
+
+    local py=""
+    local candidate
+    for candidate in python3 python; do
+        if command -v "${candidate}" > /dev/null 2>&1; then
+            py="${candidate}"
+            break
+        fi
+    done
+    if [ -z "${py}" ]; then
+        echo " ** ERROR: need either unzip or python to extract ${zip_file}" >&2
+        exit 1
+    fi
+
+    echo "unzip not found, extracting ${zip_file} with ${py}"
+    "${py}" - "${zip_file}" "${dest_dir}" << 'PY'
+import os
+import sys
+import zipfile
+
+archive, dest = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(archive) as zf:
+    for entry in zf.infolist():
+        path = zf.extract(entry, dest)
+        mode = (entry.external_attr >> 16) & 0o777
+        if mode:
+            os.chmod(path, mode)
+PY
+}
+
+# Host tag for the archives Silicon Labs and ARM publish per architecture.
+host_arch_tag()
+{
+    case "$(uname -m)" in
+        x86_64 | amd64) echo "x86_64" ;;
+        aarch64 | arm64) echo "aarch64" ;;
+        armv7* | armv8l) echo "aarch32" ;;
+        *) die "unsupported host architecture: $(uname -m)" ;;
+    esac
+}

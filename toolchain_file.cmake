@@ -1,5 +1,28 @@
 # set toolchain
-set(TOOLCHAIN_DIR ${PLATFORM_PATH}/tools/toolchain/arm-gnu-toolchain-12.2.rel1-x86_64-arm-none-eabi/bin)
+#
+# The directory carries ARM's host triple (x86_64, darwin-arm64, ...), so it
+# differs between machines -- see install_arm_toolchain in script/bootstrap.
+# Resolve it rather than naming it, which also survives a version bump.
+#
+# Anchored on CMAKE_CURRENT_LIST_DIR (this file sits in the platform root) and
+# not on PLATFORM_PATH: CMake re-includes the toolchain file inside try_compile
+# sub-projects, which never receive the -DPLATFORM_PATH from the outer
+# configure, so that variable is empty there.
+file(GLOB TOOLCHAIN_CANDIDATES
+     "${CMAKE_CURRENT_LIST_DIR}/tools/toolchain/arm-gnu-toolchain-*-arm-none-eabi")
+if(NOT TOOLCHAIN_CANDIDATES)
+    message(FATAL_ERROR
+        "No ARM toolchain found under ${CMAKE_CURRENT_LIST_DIR}/tools/toolchain.\n"
+        "Install it with: ./script/bootstrap arm_toolchain")
+endif()
+list(LENGTH TOOLCHAIN_CANDIDATES TOOLCHAIN_COUNT)
+if(TOOLCHAIN_COUNT GREATER 1)
+    message(WARNING
+        "Several ARM toolchains found; using the first of: ${TOOLCHAIN_CANDIDATES}")
+endif()
+list(GET TOOLCHAIN_CANDIDATES 0 TOOLCHAIN_ROOT)
+
+set(TOOLCHAIN_DIR ${TOOLCHAIN_ROOT}/bin)
 set(TOOLCHAIN_PRE "arm-none-eabi-")
 
 set(CMAKE_SYSTEM_NAME              Generic)

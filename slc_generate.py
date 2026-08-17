@@ -6,7 +6,7 @@ import os
 import json
 from script.util import (
     rm_rf, copy_file,
-    do_subprocess, get_system_name
+    do_subprocess, run_shell_script, get_system_name
 )
 
 try:
@@ -362,15 +362,8 @@ def generate(project_name, build_param_path):
             print(f"Warning: Failed to convert kconfig to slcp: {e}")
 
     slc_generated_projects_dir = os.path.join(build_param_path, "slc")
-    cmds = [
-        "./script/generate",
-        slcp_dst,
-        slc_generated_projects_dir,
-        board
-    ]
-    cmd = " ".join(cmds)
-
-    if do_subprocess(cmd) != 0:
+    if run_shell_script("./script/generate", slcp_dst,
+                        slc_generated_projects_dir, board) != 0:
         print(f"Failed to generate {project_name}")
         return False
 

@@ -4,6 +4,7 @@
 import os
 import platform
 import shutil
+import subprocess
 import requests
 from git import Git
 
@@ -74,6 +75,90 @@ def do_subprocess(cmd: str) -> int:
         return 1
     return ret
 
+
+
+def do_subprocess_argv(argv) -> int:
+    '''
+    Run a command given as an argument list, without going through a shell.
+
+    do_subprocess() runs os.system(), which on Windows hands the string to
+    cmd.exe. When the line both starts with a quote and contains more quotes,
+    cmd.exe strips the outermost pair, so
+
+        "C:\\...\\python.exe" -c "import jinja2"
+
+    arrives split in the wrong place and fails. Passing the arguments as a
+    list avoids quoting rules entirely, on every OS.
+
+    return: 0: success, other: error
+    '''
+    if not argv:
+        print("Subprocess argv is empty.")
+        return 0
+
+    print("do subprocess: " + " ".join(str(a) for a in argv))
+
+    try:
+        return subprocess.run([str(a) for a in argv]).returncode
+    except OSError as e:
+        print(f"Do subprocess error: {str(e)}")
+        return 1
+
+
+def find_bash() -> str:
+    '''
+    Locate a POSIX bash to run the script/ helpers with.
+
+    Windows has no bash of its own; Git for Windows ships one. Note that
+    C:\\Windows\\System32\\bash.exe is the WSL launcher, not Git Bash -- it sees
+    a different filesystem, so it is skipped deliberately.
+
+    return: path to bash, or "" when none was found
+    '''
+    if get_system_name() != "windows":
+        return shutil.which("bash") or ""
+
+    candidate = shutil.which("bash")
+    if candidate and "system32" not in candidate.lower():
+        return candidate
+
+    # Derive the Git install root from git.exe, then try the usual layouts.
+    roots = []
+    git_exe = shutil.which("git")
+    if git_exe:
+        # <root>\cmd\git.exe or <root>\bin\git.exe
+        roots.append(os.path.dirname(os.path.dirname(git_exe)))
+    roots += [r"C:\Program Files\Git", r"C:\Program Files (x86)\Git"]
+
+    for root in roots:
+        for rel in (r"bin\bash.exe", r"usr\bin\bash.exe"):
+            path = os.path.join(root, rel)
+            if os.path.isfile(path):
+                return path
+    return ""
+
+
+def run_shell_script(script, *args) -> int:
+    '''
+    Run one of the script/ bash helpers.
+
+    Executing "./script/bootstrap" directly only works where the kernel honours
+    the shebang. On Windows cmd.exe just reports that "." is not a command, so
+    the script has to be handed to bash explicitly.
+
+    return: 0: success, other: error
+    '''
+    argv = [script, *args]
+
+    if get_system_name() == "windows":
+        bash = find_bash()
+        if not bash:
+            print(" ** ERROR: no bash found to run " + script)
+            print("    Install Git for Windows (it ships bash) and retry.")
+            return 1
+        argv = [bash, *argv]
+
+    return do_subprocess_argv(argv)
 
 
 def need_settarget(target_file, target):

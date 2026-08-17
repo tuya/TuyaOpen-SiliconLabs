@@ -80,6 +80,17 @@ run_slc()
     # Sanitize for SLC only. Keep eval for legacy quoting (--with=...).
     local clean_path
     clean_path="$(_slc_clean_path)"
+
+    # slc's launcher calls a bare `java`, so a JRE fetched into tools/ by
+    # install_jre has to be put on the PATH here -- nothing else adds it, and
+    # the host may well have no java of its own (a CI runner without sudo, for
+    # one). A system java still wins when it is present, since install_jre
+    # skips the download in that case and this directory does not exist.
+    local bundled_jre="${repo_dir}/tools/jre/bin"
+    if [ -x "${bundled_jre}/java" ]; then
+        clean_path="${bundled_jre}:${clean_path}"
+    fi
+
     eval env -u VIRTUAL_ENV -u PYTHONHOME -u PYTHONPATH PATH=\"${clean_path}\" \
         "${slc_cmd}" "${slc_args[*]}"
 }

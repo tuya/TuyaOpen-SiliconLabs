@@ -155,6 +155,44 @@ def _slc_installed(root):
     return False
 
 
+def _slc_bundled_python(root):
+    """
+    Locate the CPython that SLC embeds to render its Jinja templates.
+
+    The interpreter's place differs by host -- CPython on Windows keeps
+    python.exe at the top of the distribution while the Unix builds put a
+    version-named binary under bin/ -- so probe instead of naming one path. A
+    hardcoded bin/python3.10 silently matched nothing on Windows, and the only
+    symptom was slc generate reporting "Couldn't open script file" for every
+    template long afterwards.
+
+    return: path to the interpreter, or None
+    """
+    import glob
+
+    base = os.path.join(root, "tools", "slc", "slc_cli", "bin", "slc-cli",
+                        "developer", "adapter_packs", "python")
+    candidates = [
+        os.path.join(base, "bin", "python3"),   # Unix, unversioned
+    ]
+    # Windows layout is unverified against a real install, so accept the
+    # interpreter at either level rather than betting on one.
+    candidates += sorted(glob.glob(os.path.join(base, "python*.exe")))
+    candidates += sorted(glob.glob(os.path.join(base, "bin", "python*.exe")))
+    # Versioned Unix names last, newest first, so a version bump still resolves.
+    candidates += sorted(
+        glob.glob(os.path.join(base, "bin", "python3.[0-9]*")), reverse=True)
+
+    for path in candidates:
+        # bin/ also holds python3.10-config and friends, which are not
+        # interpreters.
+        if "config" in os.path.basename(path):
+            continue
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def _ensure_jinja2(root):
     """
     SLC template generation needs Jinja2 in BOTH:
@@ -171,21 +209,15 @@ def _ensure_jinja2(root):
         if p:
             pythons.append(p)
     # SLC bundled Python
-    slc_py = os.path.join(
-        root,
-        "tools",
-        "slc",
-        "slc_cli",
-        "bin",
-        "slc-cli",
-        "developer",
-        "adapter_packs",
-        "python",
-        "bin",
-        "python3.10",
-    )
-    if os.path.isfile(slc_py):
+    slc_py = _slc_bundled_python(root)
+    if slc_py:
         pythons.append(slc_py)
+    else:
+        # Say so rather than skipping quietly. Without Jinja2 in this
+        # interpreter, slc generate fails much later with "Couldn't open script
+        # file" against each template and names nothing else.
+        print("WARNING: SLC's bundled Python was not found; "
+              "template generation will fail if it lacks Jinja2")
 
     # Unique preserve order
     seen = set()

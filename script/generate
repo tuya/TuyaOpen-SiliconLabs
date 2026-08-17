@@ -113,8 +113,9 @@ trust_sdk_and_extensions()
             echo "======================================================================"
             set -x
 
-            # Always refresh symlink so shared SDK points at the current worktree
-            ln -sfn "${extension_dir}" "${extension_symlink}"
+            # Always refresh the link so a shared SDK points at the current
+            # worktree. link_dir in script/util because Windows needs a junction.
+            link_dir "${extension_dir}" "${extension_symlink}"
 
             # Trust the extension (extpath must be under the same real sdk_dir)
             run_slc -v 1 signature trust --sdk "${sdk_dir}" -extpath "${extension_symlink}" -data "${tuyaopen_slc_data}"

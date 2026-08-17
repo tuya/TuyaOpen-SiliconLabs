@@ -8,7 +8,8 @@ import subprocess
 
 from script.util import (
     rm_rf, copy_file,
-    do_subprocess, do_subprocess_argv, get_system_name
+    do_subprocess, do_subprocess_argv, run_shell_script,
+    get_system_name
 )
 
 
@@ -225,12 +226,12 @@ def download_tools(root, prepare_file):
 
     if need_toolchain:
         print("Initializing toolchain + Silicon Labs tools ...")
-        if do_subprocess("./script/bootstrap") != 0:
+        if run_shell_script("./script/bootstrap") != 0:
             return False
     elif need_slc:
         # Toolchain may already exist from a partial bootstrap; still need SLC CLI.
         print("SLC CLI not found, installing Silicon Labs tools ...")
-        if do_subprocess("./script/bootstrap_silabs") != 0:
+        if run_shell_script("./script/bootstrap_silabs") != 0:
             print("Failed to install SLC CLI. Run: ./script/bootstrap silabs")
             return False
 

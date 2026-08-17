@@ -105,6 +105,62 @@ def do_subprocess_argv(argv) -> int:
         return 1
 
 
+def find_bash() -> str:
+    '''
+    Locate a POSIX bash to run the script/ helpers with.
+
+    Windows has no bash of its own; Git for Windows ships one. Note that
+    C:\\Windows\\System32\\bash.exe is the WSL launcher, not Git Bash -- it sees
+    a different filesystem, so it is skipped deliberately.
+
+    return: path to bash, or "" when none was found
+    '''
+    if get_system_name() != "windows":
+        return shutil.which("bash") or ""
+
+    candidate = shutil.which("bash")
+    if candidate and "system32" not in candidate.lower():
+        return candidate
+
+    # Derive the Git install root from git.exe, then try the usual layouts.
+    roots = []
+    git_exe = shutil.which("git")
+    if git_exe:
+        # <root>\cmd\git.exe or <root>\bin\git.exe
+        roots.append(os.path.dirname(os.path.dirname(git_exe)))
+    roots += [r"C:\Program Files\Git", r"C:\Program Files (x86)\Git"]
+
+    for root in roots:
+        for rel in (r"bin\bash.exe", r"usr\bin\bash.exe"):
+            path = os.path.join(root, rel)
+            if os.path.isfile(path):
+                return path
+    return ""
+
+
+def run_shell_script(script, *args) -> int:
+    '''
+    Run one of the script/ bash helpers.
+
+    Executing "./script/bootstrap" directly only works where the kernel honours
+    the shebang. On Windows cmd.exe just reports that "." is not a command, so
+    the script has to be handed to bash explicitly.
+
+    return: 0: success, other: error
+    '''
+    argv = [script, *args]
+
+    if get_system_name() == "windows":
+        bash = find_bash()
+        if not bash:
+            print(" ** ERROR: no bash found to run " + script)
+            print("    Install Git for Windows (it ships bash) and retry.")
+            return 1
+        argv = [bash, *argv]
+
+    return do_subprocess_argv(argv)
+
+
 def need_settarget(target_file, target):
     if not os.path.exists(target_file):
         return True

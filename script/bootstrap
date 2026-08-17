@@ -96,15 +96,17 @@ install_packages()
     # it ever reaches the toolchain install.
     #
     # Skipping the step is usually right, since such an image normally already
-    # carries these packages. But skipping blindly trades one clear failure for
-    # a confusing one much later: without java, for instance, nothing breaks
-    # until slc runs, twenty minutes into the build. So check what the rest of
-    # the bootstrap actually needs and report anything missing up front. unzip
-    # is not in the list -- bootstrap_silabs falls back to python for zips.
+    # carries these packages. But skipping blindly only moves the failure much
+    # later, to an error that says nothing about the cause, so check what the
+    # rest of the bootstrap actually needs and report anything missing up front.
+    #
+    # Two are deliberately absent from the list: unzip, because
+    # bootstrap_silabs falls back to python for zip archives, and java, because
+    # install_jre fetches a JRE when the host has none.
     if [ "${PM}" = "apt" ] && ! sudo -n true 2> /dev/null; then
         local missing=""
         local tool
-        for tool in java git tar bzip2 xz python3; do
+        for tool in git tar bzip2 xz python3; do
             command -v "${tool}" > /dev/null 2>&1 || missing="${missing} ${tool}"
         done
         if ! command -v curl > /dev/null 2>&1 && ! command -v wget > /dev/null 2>&1; then
@@ -182,11 +184,83 @@ install_arm_toolchain()
     rm -rf "${toolchain_dir:?}/${tarball:?}"
 }
 
+install_jre()
+{
+    local jre_dir="${repo_dir}/tools/jre"
+
+    if command -v java > /dev/null 2>&1; then
+        echo "'java' found on PATH. Skipping JRE install"
+        return 0
+    fi
+    if [ -x "${jre_dir}/bin/java" ]; then
+        echo "Bundled JRE already installed at ${jre_dir}"
+        return 0
+    fi
+
+    # slc is a Java application, and the apt step that would have installed a
+    # JDK is skipped wherever sudo needs a password -- a CI runner, typically.
+    # Fetch a JRE into tools/ the same way the ARM toolchain is fetched rather
+    # than asking every such host to install one by hand. 17 matches the
+    # version install_packages_brew asks for; Adoptium serves ~40 MB per host.
+    local os arch ext
+    case "$(uname -s)" in
+        Darwin) os="mac" ext="tar.gz" ;;
+        MINGW* | MSYS* | CYGWIN*) os="windows" ext="zip" ;;
+        *) os="linux" ext="tar.gz" ;;
+    esac
+    case "$(uname -m)" in
+        x86_64 | amd64) arch="x64" ;;
+        aarch64 | arm64) arch="aarch64" ;;
+        *)
+            echo " ** ERROR: no Adoptium JRE published for $(uname -m)" >&2
+            exit 1
+            ;;
+    esac
+
+    local url="https://api.adoptium.net/v3/binary/latest/17/ga/${os}/${arch}/jre/hotspot/normal/eclipse"
+    local staging="${repo_dir}/tools/.jre-staging"
+    local archive="${staging}/jre.${ext}"
+
+    echo "Installing Temurin JRE 17 (${os}/${arch}) ..."
+    rm -rf "${staging}"
+    mkdir -p "${staging}"
+
+    if command -v curl > /dev/null 2>&1; then
+        curl -fL --retry 4 --progress-bar -o "${archive}" "${url}"
+    else
+        wget --tries 4 "${url}" -O "${archive}"
+    fi
+
+    case "${ext}" in
+        tar.gz) tar xzf "${archive}" -C "${staging}" ;;
+        zip) unzip -q -o "${archive}" -d "${staging}" ;;
+    esac
+
+    # The archive holds one top-level jdk-17.x.y+z-jre directory; lift its
+    # contents so the path stays tools/jre regardless of the exact version.
+    local inner
+    inner=$(find "${staging}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+    if [ -z "${inner}" ]; then
+        echo " ** ERROR: unexpected layout inside the JRE archive" >&2
+        exit 1
+    fi
+    mkdir -p "${jre_dir}"
+    cp -R "${inner}/." "${jre_dir}/"
+    rm -rf "${staging}"
+
+    if [ ! -x "${jre_dir}/bin/java" ]; then
+        echo " ** ERROR: ${jre_dir}/bin/java is missing after install" >&2
+        exit 1
+    fi
+    "${jre_dir}/bin/java" -version
+}
+
 main()
 {
     if [ $# == 0 ]; then
         install_packages
         install_arm_toolchain
+        install_jre
         install_packages_pip3
         do_bootstrap_silabs
     elif [ "$1" == 'packages' ]; then
@@ -196,10 +270,12 @@ main()
         install_arm_toolchain "$@"
     elif [ "$1" == 'python' ]; then
         install_packages_pip3
+    elif [ "$1" == 'jre' ]; then
+        install_jre
     elif [ "$1" == 'silabs' ]; then
         do_bootstrap_silabs
     else
-        echo >&2 "Unsupported action: $1. Supported: packages, arm_toolchain, python, silabs"
+        echo >&2 "Unsupported action: $1. Supported: packages, arm_toolchain, jre, python, silabs"
         # 128 for Invalid arguments
         exit 128
     fi

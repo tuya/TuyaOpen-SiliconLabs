@@ -5,8 +5,6 @@ import os
 import platform
 import shutil
 import subprocess
-import requests
-from git import Git
 
 # "linux", "darwin_x86", "darwin_arm64", "windows"
 SYSTEM_NAME = ""

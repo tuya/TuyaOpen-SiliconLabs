@@ -3,6 +3,7 @@
 
 import sys
 import os
+import re
 import json
 from script.util import (
     rm_rf, copy_file,
@@ -13,6 +14,180 @@ try:
     from build_kconfig2slcp import kconfig2slcp
 except ImportError:
     kconfig2slcp = None
+
+
+def to_posix_path(path):
+    '''
+    Rewrite a path with forward slashes before handing it to the bash helpers.
+
+    script/generate runs under bash, and run_slc evals its command line -- where
+    a backslash is an escape character, not a separator. os.path.join produces
+    backslashes on Windows, so ".build\\tuyaopen_x.slcp" reaches slc as
+    ".buildtuyaopen_x.slcp" and the project fails to load. Windows accepts
+    forward slashes in every API we go through, so normalize on the way out.
+    '''
+    return path.replace(os.sep, "/") if os.sep != "/" else path
+
+
+# ==============================================================================
+# Prebuilt SLC output
+#
+# slc is a 205 MB Java application and its template generation is broken on
+# Windows: every Jinja template fails with "Couldn't open script file" from
+# inside JEP, with the script present, readable and hash-identical to the copy
+# that works on Linux. That is vendor code we cannot reach.
+#
+# The generated output, though, is 45 files / 348 KB and is host-independent
+# apart from a single line -- set(SDK_PATH ...) in the generated cmake. So keep
+# a copy of it in the repository, keyed by a hash of everything slc reads to
+# produce it, and restore that instead of running slc when the key matches.
+#
+# Hosts where slc works are unaffected: a key miss runs slc exactly as before.
+# The key covers the resolved .slcp and the SDK pins, so a stale payload cannot
+# be used silently -- any change to the inputs misses and regenerates.
+# ==============================================================================
+
+PREBUILT_ROOT = os.path.join("slc", "prebuilt")
+
+# The build directory ninja writes into lives under the slc output directory.
+# It is not slc's product and it is 18 MB, so it stays out of the payload.
+PREBUILT_SKIP_SUFFIX = "_build"
+
+
+def _prebuilt_key(root, slcp_file, board):
+    '''
+    Hash everything slc consumes to generate, and nothing else.
+
+    Deliberately excluded:
+      - the slc version, because the key has to be computable on a host that
+        never downloads slc -- that is the point of the payload
+      - mcu/ sources, which are compiled rather than read by the generator;
+        hashing them would miss on edits that cannot change the output, and a
+        miss on Windows means no build at all
+    '''
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(board.encode())
+
+    def feed(label, path):
+        # Label rather than the file's own path: the .slcp lives in the app's
+        # build directory, so hashing where it sits would tie the key to how
+        # that path happens to be spelled instead of to what it contains. The
+        # project name is inside the .slcp already, which is what actually
+        # distinguishes one app's output from another's.
+        h.update(b"\0")
+        h.update(label.encode())
+        h.update(b"\0")
+        with open(path, "rb") as f:
+            # Normalize line endings. Every input here is text, and the .slcp is
+            # rewritten through Python's text mode, which emits CRLF on Windows
+            # and LF elsewhere. Hashing the raw bytes would give each host a
+            # different key for identical content -- and a miss on Windows means
+            # falling back to the generator that does not work there.
+            h.update(f.read().replace(b"\r\n", b"\n"))
+
+    feed("slcp", slcp_file)
+    for rel in ("tuyaopen-si91x.slce", "platform_libsdepend",
+                os.path.join("mcu", "patch", "wiseconnect.patch")):
+        path = os.path.join(root, rel)
+        if os.path.isfile(path):
+            feed(rel.replace(os.sep, "/"), path)
+    # Component definitions drive what gets generated.
+    slc_defs = os.path.join(root, "slc", "si91x_component")
+    for dirpath, dirnames, filenames in os.walk(slc_defs):
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = os.path.join(dirpath, name)
+            feed(os.path.relpath(path, slc_defs).replace(os.sep, "/"), path)
+    return h.hexdigest()[:32]
+
+
+def _copy_tree_over(src, dst):
+    '''
+    Copy src over dst, creating what is missing and leaving the rest alone.
+
+    shutil.copytree(dirs_exist_ok=...) would do this, but wiping dst is not an
+    option: ninja's build directory sits inside it, and removing that turns
+    every configure into a full rebuild.
+    '''
+    import shutil
+
+    for dirpath, _, filenames in os.walk(src):
+        target_dir = os.path.join(dst, os.path.relpath(dirpath, src))
+        os.makedirs(target_dir, exist_ok=True)
+        for name in filenames:
+            shutil.copy2(os.path.join(dirpath, name),
+                         os.path.join(target_dir, name))
+
+
+def _rewrite_sdk_path(slc_dir, sdk_dir):
+    '''
+    Point the payload's SDK_PATH at this host's SDK.
+
+    The generated cmake holds exactly two absolute paths, both plain set()
+    lines: SDK_PATH, and a PKG_PATH that is never referenced again. Everything
+    else is written relative to them, so this one substitution is what makes
+    the payload portable.
+    '''
+    sdk_dir = to_posix_path(os.path.abspath(sdk_dir))
+    count = 0
+    for dirpath, _, filenames in os.walk(slc_dir):
+        for name in filenames:
+            if not name.endswith(".cmake"):
+                continue
+            path = os.path.join(dirpath, name)
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+            fixed = re.sub(r'(?m)^(set\(SDK_PATH\s+")[^"]*(")',
+                           lambda m: m.group(1) + sdk_dir + m.group(2), text)
+            if fixed != text:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(fixed)
+                count += 1
+    return count
+
+
+def restore_prebuilt(root, key, slc_dir, sdk_dir):
+    '''
+    Lay a prebuilt payload down as if slc had just produced it.
+
+    return: True when a payload for this key existed and was restored
+    '''
+    src = os.path.join(root, PREBUILT_ROOT, key)
+    if not os.path.isdir(src):
+        return False
+    print(f"Using prebuilt SLC output {key} (slc not needed)")
+    _copy_tree_over(src, slc_dir)
+    rewritten = _rewrite_sdk_path(slc_dir, sdk_dir)
+    print(f"Rewrote SDK_PATH in {rewritten} generated cmake file(s)")
+    return True
+
+
+def save_prebuilt(root, key, slc_dir):
+    '''
+    Capture what slc just generated, for a maintainer to commit.
+
+    Called before update_linker, which rewrites the linker script from
+    CONFIG_CORE_M4_FLASH_SIZE. That value never reaches the .slcp, so it is not
+    part of the key -- baking its result into the payload would hand the wrong
+    linker script to anyone building the same components at another flash size.
+    '''
+    import shutil
+
+    dest = os.path.join(root, PREBUILT_ROOT, key)
+    rm_rf(dest)
+    for dirpath, dirnames, filenames in os.walk(slc_dir):
+        dirnames[:] = [d for d in dirnames
+                       if not d.endswith(PREBUILT_SKIP_SUFFIX)]
+        target_dir = os.path.join(dest, os.path.relpath(dirpath, slc_dir))
+        os.makedirs(target_dir, exist_ok=True)
+        for name in filenames:
+            shutil.copy2(os.path.join(dirpath, name),
+                         os.path.join(target_dir, name))
+    total = sum(len(f) for _, _, f in os.walk(dest))
+    print(f"Saved prebuilt SLC output to {PREBUILT_ROOT}/{key} ({total} files)")
+
 
 mbr_note = """IMPORTANT: When changing M4 Flash Size, you must update the MBR (Master Boot Record)
 Run the following commands to write the new MBR configuration to your SiWx917 device:
@@ -362,10 +537,22 @@ def generate(project_name, build_param_path):
             print(f"Warning: Failed to convert kconfig to slcp: {e}")
 
     slc_generated_projects_dir = os.path.join(build_param_path, "slc")
-    if run_shell_script("./script/generate", slcp_dst,
-                        slc_generated_projects_dir, board) != 0:
-        print(f"Failed to generate {project_name}")
-        return False
+    sdk_dir = os.path.join(root, "sdks", "simplicity_sdk")
+
+    key = _prebuilt_key(root, slcp_dst, board)
+    if not restore_prebuilt(root, key, slc_generated_projects_dir, sdk_dir):
+        if run_shell_script("./script/generate", to_posix_path(slcp_dst),
+                            to_posix_path(slc_generated_projects_dir),
+                            board) != 0:
+            print(f"Failed to generate {project_name}")
+            print(f"No prebuilt SLC output for this configuration ({key}).")
+            print("SLC template generation is currently broken on Windows; "
+                  "build on Linux/WSL, or use a configuration shipped with "
+                  "this platform.")
+            return False
+        # Capture here, before update_linker edits the generated linker script.
+        if os.environ.get("SIWX917_SAVE_PREBUILT") == "1":
+            save_prebuilt(root, key, slc_generated_projects_dir)
 
     update_linker(slc_generated_projects_dir, build_config_file)
 

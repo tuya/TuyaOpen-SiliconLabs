@@ -77,7 +77,7 @@ def do_subprocess(cmd: str) -> int:
 
 
 
-def do_subprocess_argv(argv) -> int:
+def do_subprocess_argv(argv, cwd=None) -> int:
     '''
     Run a command given as an argument list, without going through a shell.
 
@@ -90,16 +90,21 @@ def do_subprocess_argv(argv) -> int:
     arrives split in the wrong place and fails. Passing the arguments as a
     list avoids quoting rules entirely, on every OS.
 
+    cwd runs the command in that directory, which is what a caller wanting
+    `cd <dir> && <cmd>` needs -- and unlike the shell form it stays correct
+    when the directory contains a space, as a Windows checkout often does.
+
     return: 0: success, other: error
     '''
     if not argv:
         print("Subprocess argv is empty.")
         return 0
 
-    print("do subprocess: " + " ".join(str(a) for a in argv))
+    prefix = f"[{cwd}] " if cwd else ""
+    print("do subprocess: " + prefix + " ".join(str(a) for a in argv))
 
     try:
-        return subprocess.run([str(a) for a in argv]).returncode
+        return subprocess.run([str(a) for a in argv], cwd=cwd).returncode
     except OSError as e:
         print(f"Do subprocess error: {str(e)}")
         return 1

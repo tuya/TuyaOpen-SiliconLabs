@@ -49,10 +49,27 @@ download_file()
     local url="$1"
     local dest="$2"
 
+    # These archives run to hundreds of MB (Commander alone is 194 MB), long
+    # enough that a connection reset mid-transfer is a normal event rather than
+    # an edge case -- one was observed dying at 78.9% with curl: (56). Plain
+    # --retry does not cover that: it retries transient HTTP responses and
+    # timeouts, not a transfer that broke after it started. So ask for
+    # --retry-all-errors as well, and space the attempts out so a server
+    # shedding load gets a moment to recover.
     if command -v curl > /dev/null 2>&1; then
-        curl -fL --retry 4 --progress-bar -o "${dest}" "${url}"
+        # --retry-all-errors landed in curl 7.71 and Ubuntu 20.04 still ships
+        # 7.68, where an unknown option is a hard error ("option ... is
+        # unknown") that would fail the download outright. Ask curl itself
+        # instead of comparing version strings.
+        local retry_all=""
+        if curl --retry-all-errors --version > /dev/null 2>&1; then
+            retry_all="--retry-all-errors"
+        fi
+        # shellcheck disable=SC2086
+        curl -fL --retry 4 ${retry_all} --retry-delay 3 \
+            --progress-bar -o "${dest}" "${url}"
     elif command -v wget > /dev/null 2>&1; then
-        wget --tries 4 "${url}" -O "${dest}"
+        wget --tries 4 --waitretry 3 "${url}" -O "${dest}"
     else
         die "neither curl nor wget is available to download ${url}"
     fi
@@ -100,6 +117,42 @@ with zipfile.ZipFile(archive) as zf:
         if mode:
             os.chmod(path, mode)
 PY
+}
+
+# Point a link at a directory, replacing whatever currently occupies the path.
+#
+# Git Bash has no usable `ln -s`: under MSYS's default winsymlinks setting it
+# silently falls back to *copying* the target. That is not merely slow here --
+# the target is this repository and the link lives inside it, under
+# sdks/simplicity_sdk/extension/, so the copy recurses into itself. A later run
+# then fails with "cannot overwrite directory" because a real directory is in
+# the way, which is how this surfaces.
+#
+# A directory junction behaves like a symlink for everything SLC does and,
+# unlike a native symlink, mklink /J creates one without elevation.
+link_dir()
+{
+    local target="$1"
+    local link="$2"
+
+    case "$(uname -s)" in
+        MINGW* | MSYS* | CYGWIN*)
+            # rmdir unlinks a junction without touching what it points at. It
+            # refuses a real directory, so fall back to removing that outright
+            # -- that is the recursive copy an earlier run may have left.
+            if [ -e "${link}" ] || [ -L "${link}" ]; then
+                rmdir "${link}" 2> /dev/null || rm -rf "${link}"
+            fi
+            # mklink names the link first and the target second, the opposite of
+            # ln, and wants native paths. The doubled slashes keep MSYS from
+            # rewriting /c and /J as paths.
+            cmd //c mklink //J "$(cygpath -w "${link}")" "$(cygpath -w "${target}")" > /dev/null \
+                || die "failed to create junction ${link} -> ${target}"
+            ;;
+        *)
+            ln -sfn "${target}" "${link}"
+            ;;
+    esac
 }
 
 # Host tag for the archives Silicon Labs and ARM publish per architecture.

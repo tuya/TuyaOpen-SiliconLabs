@@ -63,24 +63,32 @@ install_commander()
     [ -n "${COMMANDER_INSTALL_DIR-}" ] || COMMANDER_INSTALL_DIR="${repo_dir}/tools/commander"
 
     # Install Commander
-    # The outer zip is per-OS; inside it sits one archive per host
-    # architecture, so both have to be selected or the wrong binaries get
-    # installed. Verified against silabs.com: Linux and Windows publish an
-    # outer zip, macOS returns 404 at this URL pattern.
-    local os_type inner_platform
+    #
+    # The outer zip is per-OS; inside it sits one archive per host architecture,
+    # and for each a full build plus a CLI-only build, so both axes have to be
+    # selected or the wrong binaries get installed.
+    #
+    # Prefer Commander-cli. The full build links Qt5Gui/Qt5Widgets, which pull
+    # libGL/libX11/libxcb in from the host, so it cannot even reach main() on a
+    # headless container -- a CI runner dies with "libGL.so.1: cannot open
+    # shared object file" after the firmware has already compiled and linked.
+    # The CLI build links only Qt5Core/Network/SerialPort, needs no graphics
+    # libraries at all, and its postbuild output is byte-identical (verified:
+    # rps/hex/s37/isp.bin sha256 all match the full build).
+    local os_type inner_platform exe_suffix=""
     if [[ $OSTYPE == "linux"* ]]; then
         os_type="Linux"
         inner_platform="linux_$(host_arch_tag)"
     elif [[ $OSTYPE == "msys"* || $OSTYPE == "cygwin"* || $OSTYPE == "win32" ]]; then
         os_type="Windows"
         inner_platform="win32_x64"
+        exe_suffix=".exe"
     elif [[ $OSTYPE == "darwin"* ]]; then
-        echo " ** ERROR: Silicon Labs does not publish Simplicity Commander for" >&2
-        echo "    macOS at https://www.silabs.com/documents/login/software/" >&2
-        echo "    (SimplicityCommander-mac.zip returns 404). Install it by hand" >&2
-        echo "    into ${COMMANDER_INSTALL_DIR} -- building does not need it," >&2
-        echo "    only flashing does." >&2
-        exit 1
+        # One universal archive, so no arch tag. The outer zip does exist at
+        # this URL pattern -- an earlier revision of this script claimed a 404
+        # and refused to run on macOS; SimplicityCommander-Mac.zip answers 200.
+        os_type="Mac"
+        inner_platform="osx"
     else
         echo " ** ERROR: Simplicity Commander install is not supported on OSTYPE=${OSTYPE}" >&2
         exit 1
@@ -99,13 +107,17 @@ install_commander()
     extract_zip "${zip_path}" "${staging}" && rm "${zip_path}"
 
     # Pick this host's archive by name. Globbing without the platform tag would
-    # match any of the six variants Linux ships and install, say, an aarch32
-    # build on x86_64.
-    local nested
-    nested=$(find "${staging}" \( -name "Commander_${inner_platform}_*.tar.bz*" \
-        -o -name "Commander_${inner_platform}_*.zip" \) | head -n 1)
+    # match any of the variants Linux ships and install, say, an aarch32 build
+    # on x86_64. "Commander_" does not match "Commander-cli_", so the two
+    # patterns stay disjoint and the loop order is what selects the CLI build.
+    local nested prefix
+    for prefix in "Commander-cli" "Commander"; do
+        nested=$(find "${staging}" \( -name "${prefix}_${inner_platform}_*.tar.bz*" \
+            -o -name "${prefix}_${inner_platform}_*.zip" \) | head -n 1)
+        [ -n "${nested}" ] && break
+    done
     if [ -z "${nested}" ]; then
-        echo " ** ERROR: no Commander_${inner_platform}_* archive inside ${zip_url}" >&2
+        echo " ** ERROR: no Commander[-cli]_${inner_platform}_* archive inside ${zip_url}" >&2
         echo "    extracted contents were:" >&2
         find "${staging}" -maxdepth 2 >&2
         exit 1
@@ -130,6 +142,29 @@ install_commander()
     fi
     cp -R "${top}/." .
     rm -rf "${staging}"
+
+    # CMakeLists.txt and platform_flash_bridge.py both reach for a plain
+    # "commander"; the CLI archive only ships "commander-cli". Link where the
+    # host allows it, copy where it does not (Windows without developer mode).
+    if [ ! -e "commander${exe_suffix}" ] && [ -e "commander-cli${exe_suffix}" ]; then
+        ln -sf "commander-cli${exe_suffix}" "commander${exe_suffix}" \
+            || cp "commander-cli${exe_suffix}" "commander${exe_suffix}"
+    fi
+
+    # Verify it actually starts, the way install_jre verifies with `java
+    # -version`. Match on the banner rather than the exit status: a binary that
+    # cannot resolve a shared library also exits non-zero, so the status alone
+    # does not separate "ran and printed" from "never reached main". Capture
+    # first instead of piping, so the result does not depend on pipefail.
+    local banner
+    banner="$("./commander${exe_suffix}" --version 2>&1 || true)"
+    if ! printf '%s\n' "${banner}" | grep -q "Simplicity Commander"; then
+        echo " ** ERROR: ${COMMANDER_INSTALL_DIR}/commander${exe_suffix} does not run." >&2
+        printf '    output was: %s\n' "${banner}" >&2
+        exit 1
+    fi
+    echo "Installed $(basename "${nested}")"
+
     popd
 }
 

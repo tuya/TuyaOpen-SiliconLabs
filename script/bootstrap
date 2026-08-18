@@ -62,7 +62,7 @@ install_packages_brew()
         git-lfs
         grep
         ninja-build
-        openjdk@17
+        openjdk@21
         unzip
         wget
         bzip2
@@ -271,8 +271,15 @@ install_jre()
     # slc is a Java application, and the apt step that would have installed a
     # JDK is skipped wherever sudo needs a password -- a CI runner, typically.
     # Fetch a JRE into tools/ the same way the ARM toolchain is fetched rather
-    # than asking every such host to install one by hand. 17 matches the
-    # version install_packages_brew asks for; Adoptium serves ~40 MB per host.
+    # than asking every such host to install one by hand.
+    #
+    # 21, not 17: nine of slc's own plugin jars are compiled to class file
+    # version 65 with Multi-Release unset -- com.silabs.uc.cli.product and
+    # com.silabs.ss.framework.uc.extension among them -- so a 17 runtime cannot
+    # load them. It fails as an UnsupportedClassVersionError that slc reports
+    # only as "An error has occurred. See the log file", which is what made a
+    # CI run spend 51 minutes to say nothing. install_packages_apt already asks
+    # for openjdk-21; the openjdk@17 on the brew list is the stale entry.
     local os arch ext
     case "$(uname -s)" in
         Darwin) os="mac" ext="tar.gz" ;;
@@ -288,11 +295,11 @@ install_jre()
             ;;
     esac
 
-    local url="https://api.adoptium.net/v3/binary/latest/17/ga/${os}/${arch}/jre/hotspot/normal/eclipse"
+    local url="https://api.adoptium.net/v3/binary/latest/21/ga/${os}/${arch}/jre/hotspot/normal/eclipse"
     local staging="${repo_dir}/tools/.jre-staging"
     local archive="${staging}/jre.${ext}"
 
-    echo "Installing Temurin JRE 17 (${os}/${arch}) ..."
+    echo "Installing Temurin JRE 21 (${os}/${arch}) ..."
     rm -rf "${staging}"
     mkdir -p "${staging}"
 
@@ -303,7 +310,7 @@ install_jre()
         zip) extract_zip "${archive}" "${staging}" ;;
     esac
 
-    # The archive holds one top-level jdk-17.x.y+z-jre directory; lift its
+    # The archive holds one top-level jdk-21.x.y+z-jre directory; lift its
     # contents so the path stays tools/jre regardless of the exact version.
     local inner
     inner=$(find "${staging}" -mindepth 1 -maxdepth 1 -type d | head -n 1)

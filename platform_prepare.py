@@ -120,9 +120,8 @@ def need_prepare(root, prepare_file, target):
             libs_need_prepare.append(name)
             result = True
 
-    toolchain_path = os.path.join(root, "tools/toolchain")
-    if not os.path.exists(toolchain_path):
-        print("Tools path not exists, need prepare.")
+    if not _toolchain_installed(root):
+        print("ARM toolchain not found, need prepare.")
         result = True
     if not _slc_installed(root):
         print("SLC CLI not found, need prepare.")
@@ -151,6 +150,25 @@ def _slc_installed(root):
             if name.startswith("slc"):
                 path = os.path.join(dirpath, name)
                 if os.path.isfile(path) and os.access(path, os.X_OK):
+                    return True
+    return False
+
+
+def _toolchain_installed(root):
+    """
+    Return True if an extracted bare-metal ARM toolchain sits in the shared
+    platform/tools directory.
+
+    Looks for the compiler rather than the directory: platform/tools is shared
+    with every other platform and CI pre-seeds it with tarballs, so the
+    directory is there long before anything has been unpacked into it.
+    """
+    import glob
+    shared = os.path.join(root, os.pardir, "tools")
+    for pattern in ("gcc-arm-none-eabi-*", "arm-gnu-toolchain-*-arm-none-eabi"):
+        for path in glob.glob(os.path.join(shared, pattern)):
+            for exe in ("arm-none-eabi-gcc", "arm-none-eabi-gcc.exe"):
+                if os.path.isfile(os.path.join(path, "bin", exe)):
                     return True
     return False
 
@@ -252,8 +270,7 @@ def _ensure_jinja2(root):
 
 def download_tools(root, prepare_file):
     print("Downloading Tools...")
-    toolchain_path = os.path.join(root, "tools/toolchain")
-    need_toolchain = not os.path.exists(toolchain_path)
+    need_toolchain = not _toolchain_installed(root)
     need_slc = not _slc_installed(root)
 
     if need_toolchain:

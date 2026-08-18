@@ -1,18 +1,34 @@
 # set toolchain
 #
-# The directory carries ARM's host triple (x86_64, darwin-arm64, ...), so it
-# differs between machines -- see install_arm_toolchain in script/bootstrap.
-# Resolve it rather than naming it, which also survives a version bump.
+# Looked up in platform/tools/, the directory every TuyaOpen platform shares --
+# T5AI and GD32 resolve theirs the same way, and the CI runner pre-seeds it.
+# The name carries a version and, for ARM's own builds, a host triple, so
+# resolve it rather than spelling it out; that also survives a version bump.
 #
 # Anchored on CMAKE_CURRENT_LIST_DIR (this file sits in the platform root) and
 # not on PLATFORM_PATH: CMake re-includes the toolchain file inside try_compile
 # sub-projects, which never receive the -DPLATFORM_PATH from the outer
 # configure, so that variable is empty there.
-file(GLOB TOOLCHAIN_CANDIDATES
-     "${CMAKE_CURRENT_LIST_DIR}/tools/toolchain/arm-gnu-toolchain-*-arm-none-eabi")
+set(TOOLCHAIN_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}/../tools")
+file(GLOB TOOLCHAIN_GLOB
+     "${TOOLCHAIN_SHARED_DIR}/gcc-arm-none-eabi-*"
+     "${TOOLCHAIN_SHARED_DIR}/arm-gnu-toolchain-*-arm-none-eabi")
+
+# The shared directory also holds the tarballs CI seeds it with, and those match
+# the same glob, so keep only entries that are a directory with a compiler in
+# them.
+set(TOOLCHAIN_CANDIDATES "")
+foreach(candidate ${TOOLCHAIN_GLOB})
+    if(IS_DIRECTORY "${candidate}"
+       AND (EXISTS "${candidate}/bin/arm-none-eabi-gcc"
+            OR EXISTS "${candidate}/bin/arm-none-eabi-gcc.exe"))
+        list(APPEND TOOLCHAIN_CANDIDATES "${candidate}")
+    endif()
+endforeach()
+
 if(NOT TOOLCHAIN_CANDIDATES)
     message(FATAL_ERROR
-        "No ARM toolchain found under ${CMAKE_CURRENT_LIST_DIR}/tools/toolchain.\n"
+        "No ARM toolchain found under ${TOOLCHAIN_SHARED_DIR}.\n"
         "Install it with: ./script/bootstrap arm_toolchain")
 endif()
 list(LENGTH TOOLCHAIN_CANDIDATES TOOLCHAIN_COUNT)

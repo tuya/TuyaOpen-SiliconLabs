@@ -454,7 +454,7 @@ OPERATE_RET tkl_gpio_read(TUYA_GPIO_NUM_E pin_id, TUYA_GPIO_LEVEL_E *level)
     sl_status_t      status;
     sl_gpio_t        gpio;
     const pin_map_t *pin_info;
-    uint8_t          pin_value;
+    uint8_t          pin_value = 0;
 
     if (level == NULL) {
         return OPRT_INVALID_PARM;

@@ -95,6 +95,43 @@ run_slc()
         "${slc_cmd}" "${slc_args[*]}"
 }
 
+# Locate the launcher inside an slc-cli installation.
+#
+# Name the launchers instead of globbing. Both slc.bat and slc are two-line
+# wrappers around `java -jar slc.jar`, but `find -name 'slc*'` also matches
+# bin/slc-cli/slc-cli.exe -- the Eclipse/Equinox launcher, which is a different
+# program with a different command line entirely (it rejects --version and
+# suggests --verbose). NTFS enumerates bin/ before slc, so on Windows
+# `head -n 1` picked exactly that, and every slc call went to the wrong binary.
+# ext4 happened to order slc first, which is the only reason Linux worked.
+#
+# The executable bit cannot be trusted either: slc.bat arrives without one, so
+# the old `-perm /111` filter dropped the correct Windows entry point from the
+# candidate list before ordering even mattered.
+_slc_find_launcher()
+{
+    local root="$1" names name cand
+    case "${OSTYPE-}" in
+        msys* | cygwin* | win32) names="slc.bat slc" ;;
+        *)                       names="slc slc.bat" ;;
+    esac
+    for name in ${names}; do
+        for cand in "${root}/slc_cli/${name}" "${root}/${name}"; do
+            if [ -f "${cand}" ]; then
+                # The shell wrapper is executed directly; a zip extracted
+                # without permissions would otherwise fail here.
+                case "${cand}" in
+                    *.bat) : ;;
+                    *) [ -x "${cand}" ] || chmod +x "${cand}" 2>/dev/null || true ;;
+                esac
+                printf '%s' "${cand}"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 # Find the command to use for slc
 slc_init()
 {
@@ -110,16 +147,15 @@ slc_init()
     else
         echo "Searching for 'slc*' executable in '${SLC_INSTALL_DIR}'"
 
-        # Find the slc executable
-        slc_cmd=$(find "${SLC_INSTALL_DIR}" -perm "$([[ $OSTYPE == darwin* ]] && echo '+' || echo '/')"111 -name 'slc*' -type f | head -n 1)
+        # Find the slc launcher
+        slc_cmd=$(_slc_find_launcher "${SLC_INSTALL_DIR}" || true)
 
         # Automatically download slc if not found
         if [ -z "${slc_cmd}" ]; then
-            echo "-- No 'slc*' executable found. Downloading"
+            echo "-- No slc launcher found. Downloading"
             "${repo_dir}"/script/bootstrap_silabs
 
-            # Find the slc executable
-            slc_cmd=$(find "${SLC_INSTALL_DIR}" -perm "$([[ $OSTYPE == darwin* ]] && echo '+' || echo '/')"111 -name 'slc*' -type f | head -n 1)
+            slc_cmd=$(_slc_find_launcher "${SLC_INSTALL_DIR}" || true)
         fi
 
     fi

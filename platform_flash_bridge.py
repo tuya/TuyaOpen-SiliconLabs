@@ -43,7 +43,6 @@ import json
 import os
 import platform
 import subprocess
-import sys
 
 # -----------------------------------------------------------------------------
 #                                  Constants
@@ -98,15 +97,6 @@ RPS_VER_B_OFFSET = 0x2C       # patch, customer, rom_id, chip_id
 # production programming.
 FLASH_ACTION_ENV = "SIWX917_FLASH"
 FLASH_ACTIONS = ("app", "ta", "both")
-
-# Menu order is the menu's own concern, so pair each entry with the action it
-# selects rather than indexing FLASH_ACTIONS: the safe choice has to come first,
-# which is not the order the actions happen to be named in.
-MENU_OPTIONS = (
-    ("app", "Flash M4 application only"),
-    ("both", "Flash TA firmware, then M4 application"),
-    ("ta", "Flash TA firmware only"),
-)
 
 ISP_PROMPT = """
 --------------------------------------------------------------------
@@ -348,15 +338,22 @@ def _bundled_ta_version(logger) -> str:
             f".{patch}.{customer}.{build}")
 
 
-def _device_nwp_version(commander, device, serial, port, logger) -> str:
-    """
-    NWP/TA firmware version reported by the attached device, or "".
+def _version_is_blank(version: str) -> bool:
+    """A version of nothing but zeros and separators means no firmware."""
+    return not [c for c in version if c not in "0.: \t"]
 
-    Read-only: `mfg917 info` reports the device's configuration, and the JSON
-    form means no output scraping. An empty return covers every way this can go
-    wrong -- no probe, no TA firmware, a Commander too old to report it -- on
-    purpose, because the caller must not act differently on causes it cannot
-    distinguish.
+
+def _device_nwp_version(commander, device, serial, port, logger):
+    """
+    Ask the device what NWP/TA firmware it runs.
+
+    return: (answered, version)
+
+    answered says the device replied, whatever it replied. That is the
+    distinction the caller needs: "this board reports no NWP firmware" is a
+    fact to act on, while "nothing could be asked" -- no probe, a serial
+    channel that does not carry this command, a Commander too old to report it
+    -- is not, and must never be mistaken for the first.
     """
     argv = [commander, "mfg917", "info", "-d", device, "--json"]
     if serial and port:
@@ -368,58 +365,39 @@ def _device_nwp_version(commander, device, serial, port, logger) -> str:
                               timeout=MFG_INFO_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as e:
         logger.debug(f"mfg917 info failed: {e}")
-        return ""
+        return False, ""
     if done.returncode != 0:
         logger.debug(f"mfg917 info returned {done.returncode}")
-        return ""
+        return False, ""
 
     try:
         info = json.loads(done.stdout)["result"]["mfg917_info"]
     except (ValueError, KeyError, TypeError) as e:
         logger.debug(f"Cannot parse mfg917 info output: {e}")
-        return ""
-    return str(info.get("nwp_firmware_version", "")).strip()
+        return False, ""
 
-
-def _menu_action(device_ver: str, bundled_ver: str, logger) -> str:
-    """Ask which images to write. Returns one of FLASH_ACTIONS, or "" to abort."""
-    print("--------------------")
-    print(f" Device NWP firmware : {device_ver or '(unreadable)'}")
-    print(f" Bundled TA firmware : {bundled_ver or '(unreadable)'}")
-    print("--------------------")
-    for i, (_, text) in enumerate(MENU_OPTIONS):
-        print(f"{i + 1}. {text}")
-    print("--------------------")
-    print('Input "q" to exit.')
-    while True:
-        try:
-            key = input("Flash action: ")
-        except (EOFError, KeyboardInterrupt):
-            return ""
-        if key == "q":
-            return ""
-        try:
-            num = int(key)
-        except ValueError:
-            continue
-        if 1 <= num <= len(MENU_OPTIONS):
-            return MENU_OPTIONS[num - 1][0]
+    version = str(info.get("nwp_firmware_version", "")).strip()
+    return True, "" if _version_is_blank(version) else version
 
 
 def _choose_action(commander, device, serial, port, logger) -> str:
     """
     Decide what to write. Returns one of FLASH_ACTIONS, or "" to abort.
 
-    Writing the NWP firmware means erasing it first, so every write is a window
-    in which losing power leaves the radio without usable firmware. Doing that
-    on every flash would pay that risk hundreds of times over a day of
-    iteration for no gain, so the default path never touches it: TA is written
-    only when this can see it is needed and a human says so, or when the
-    environment asks for it outright.
+    The application cannot run without NWP/TA firmware, so a device that has
+    none gets both. A device that already has some keeps it, whatever version
+    it is: writing NWP firmware erases it first, which is a window where losing
+    power leaves the radio unusable, and the image bundled here is not
+    necessarily newer than what a board shipped with. Replacing a working one
+    is a decision for whoever has a reason, spelled SIWX917_FLASH=ta.
+
+    Only a device that answered can be said to have no firmware. When nothing
+    could be asked, this writes the application alone and says so -- guessing
+    the other way would erase NWP firmware over a probe that merely hiccuped.
     """
     forced = os.environ.get(FLASH_ACTION_ENV, "").strip().lower()
-    # SIWX917_FLASH_TA=1 said "write the TA firmware instead of the app" before
-    # there was a menu. Keep it working as a name for that choice.
+    # SIWX917_FLASH_TA=1 predates this and meant "write the TA firmware instead
+    # of the application". Keep it working as a name for that.
     if not forced and os.environ.get("SIWX917_FLASH_TA") == "1":
         forced = "ta"
     if forced:
@@ -427,31 +405,28 @@ def _choose_action(commander, device, serial, port, logger) -> str:
             logger.error(f"{FLASH_ACTION_ENV}={forced} is not one of "
                          f"{'/'.join(FLASH_ACTIONS)}")
             return ""
-        logger.info(f"{FLASH_ACTION_ENV}={forced} -- not asking.")
+        logger.info(f"{FLASH_ACTION_ENV}={forced} -- honouring it as given.")
         return forced
 
-    bundled_ver = _bundled_ta_version(logger)
-    device_ver = _device_nwp_version(commander, device, serial, port, logger)
+    answered, device_ver = _device_nwp_version(
+        commander, device, serial, port, logger)
 
-    if device_ver and bundled_ver and device_ver == bundled_ver:
-        logger.info(f"NWP/TA firmware already {device_ver} -- flashing the "
+    if answered and device_ver:
+        logger.info(f"Device NWP/TA firmware: {device_ver} -- flashing the "
                     "application only.")
         return "app"
 
-    logger.warning("Device NWP/TA firmware does not match what this platform "
-                   "ships, or could not be read.")
-    logger.warning(f"  device : {device_ver or '(unreadable)'}")
-    logger.warning(f"  bundled: {bundled_ver or '(unreadable)'}")
+    if answered:
+        logger.warning("Device reports no NWP/TA firmware -- flashing it "
+                       f"first, from {TA_FIRMWARE_RELPATH} "
+                       f"({_bundled_ta_version(logger) or 'version unknown'}).")
+        return "both"
 
-    if not sys.stdin.isatty():
-        # Never block a script waiting for a keypress, and never write the NWP
-        # firmware on a guess: flash the application and say what was skipped.
-        logger.warning("Not a terminal -- flashing the application only. "
-                       f"Set {FLASH_ACTION_ENV}=ta or both to write the TA "
-                       "firmware; the application will not run without it.")
-        return "app"
-
-    return _menu_action(device_ver, bundled_ver, logger)
+    logger.warning("Could not read the device's NWP/TA firmware version, so "
+                   "this will not write one: flashing the application only.")
+    logger.warning("If the application does not start, the radio may have no "
+                   f"firmware. Write it with {FLASH_ACTION_ENV}=both.")
+    return "app"
 
 
 # -----------------------------------------------------------------------------
@@ -470,10 +445,10 @@ def platform_flash(using_data=None,
 
     Channel is auto-detected (see module docstring); -p <port> forces serial.
     The device carries two firmwares: the M4 application built here, and the
-    NWP/TA firmware the radio runs. The application will not get far without a
-    matching TA, so the device's version is read first and, when it does not
-    match the image bundled in mcu/patch, the choice of what to write is put to
-    the user. Set SIWX917_FLASH=app|ta|both to answer that without a prompt.
+    NWP/TA firmware the radio runs. The application needs one to start, so a
+    device that reports having none gets it written first, from mcu/patch. A
+    device that already has some keeps it. SIWX917_FLASH=app|ta|both overrides
+    the whole decision.
     """
     using_data = using_data or {}
 

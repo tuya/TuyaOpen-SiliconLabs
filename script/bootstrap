@@ -225,6 +225,15 @@ install_arm_toolchain()
     # on the next run; a generic "gcc-arm.tar.xz" could never match what CI
     # seeds the shared directory with.
     local tarball="${toolchain_dir}/${tarball_name}"
+    # Present is not the same as usable. A download killed mid-transfer before
+    # download_file was made atomic, or a bad tarball seeded into the shared
+    # directory, leaves a file that this cache check would honour forever --
+    # skipping the download on every later run and failing in extraction with
+    # "End-of-central-directory signature not found", which names nothing.
+    if [ -f "${tarball}" ] && ! archive_ok "${tarball}"; then
+        echo "Discarding corrupt ${tarball_name}; it will be downloaded again"
+        rm -f "${tarball}"
+    fi
     if [ -f "${tarball}" ]; then
         echo "Found ${tarball_name} already present. Skipping download"
     else

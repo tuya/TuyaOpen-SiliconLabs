@@ -39,9 +39,11 @@ call instead of reusing get_system_name().
 """
 
 import glob
+import json
 import os
 import platform
 import subprocess
+import sys
 
 # -----------------------------------------------------------------------------
 #                                  Constants
@@ -72,6 +74,39 @@ SERIAL_GLOBS = {
 TA_FIRMWARE_RELPATH = os.path.join("mcu", "patch", "RS9117_WC_SI.rps")
 
 SWD_PROBE_TIMEOUT = 20
+MFG_INFO_TIMEOUT = 30
+
+# Where the version sits inside an RPS header, and what has to hold for the
+# header to be one at all.
+#
+# Reverse-engineered, not documented: commander offers no way to read a version
+# out of an .rps (rps has only convert/create/load/sign), so the layout was
+# derived by matching the bundled TA image against what `mfg917 info` reported
+# for a board carrying it -- all eight fields agreed, across two separate
+# offsets. Treat it as a strong guess rather than a specification: check the
+# structure first and report the version as unknown when anything is off,
+# because the only thing acting on a wrong answer could do is overwrite a good
+# NWP firmware.
+RPS_HEADER_LEN = 64
+RPS_MAGIC_OFFSET = 4          # uint16 LE, 0x900D
+RPS_MAGIC = 0x900D
+RPS_IMAGE_SIZE_OFFSET = 8     # uint32 LE, file length minus the header
+RPS_VER_A_OFFSET = 0x0C       # build, security, minor, major
+RPS_VER_B_OFFSET = 0x2C       # patch, customer, rom_id, chip_id
+
+# Set to app / ta / both to answer the flash menu without a prompt, for CI and
+# production programming.
+FLASH_ACTION_ENV = "SIWX917_FLASH"
+FLASH_ACTIONS = ("app", "ta", "both")
+
+# Menu order is the menu's own concern, so pair each entry with the action it
+# selects rather than indexing FLASH_ACTIONS: the safe choice has to come first,
+# which is not the order the actions happen to be named in.
+MENU_OPTIONS = (
+    ("app", "Flash M4 application only"),
+    ("both", "Flash TA firmware, then M4 application"),
+    ("ta", "Flash TA firmware only"),
+)
 
 ISP_PROMPT = """
 --------------------------------------------------------------------
@@ -251,6 +286,174 @@ def _flash_swd(commander, image, device, logger) -> bool:
     return False
 
 
+def _flash_ta(commander, device, serial, port, fixedspeed, logger) -> bool:
+    """
+    Write the bundled NWP/TA firmware.
+
+    Two channels, two commands. Over serial this is the same `serial load` the
+    application takes, because both are .rps images going through the ISP
+    bootloader. Over SWD it is `rps load`, which is what Commander provides for
+    putting an NWP image on a device -- not plain `flash`, which is a raw flash
+    writer and knows nothing about the image it is handed.
+    """
+    image = os.path.join(_platform_root(), TA_FIRMWARE_RELPATH)
+    if not _check_image(image, logger):
+        return False
+
+    if serial:
+        return _flash_serial(commander, image, port, device, fixedspeed, logger)
+
+    logger.info(f"Loading NWP/TA firmware over SWD: {os.path.basename(image)}")
+    if _run([commander, "rps", "load", image, "-d", device], logger):
+        return True
+    logger.error(SWD_HINTS)
+    return False
+
+
+# -----------------------------------------------------------------------------
+#                          NWP/TA firmware inspection
+# -----------------------------------------------------------------------------
+
+def _bundled_ta_version(logger) -> str:
+    """Version of the TA image shipped here, or "" when it cannot be read."""
+    image = os.path.join(_platform_root(), TA_FIRMWARE_RELPATH)
+    try:
+        size = os.path.getsize(image)
+        with open(image, "rb") as f:
+            head = f.read(RPS_HEADER_LEN)
+    except OSError as e:
+        logger.debug(f"Cannot read {image}: {e}")
+        return ""
+
+    if len(head) < RPS_HEADER_LEN:
+        logger.debug(f"{image} is shorter than an RPS header")
+        return ""
+
+    magic = int.from_bytes(
+        head[RPS_MAGIC_OFFSET:RPS_MAGIC_OFFSET + 2], "little")
+    image_size = int.from_bytes(
+        head[RPS_IMAGE_SIZE_OFFSET:RPS_IMAGE_SIZE_OFFSET + 4], "little")
+    if magic != RPS_MAGIC or image_size != size - RPS_HEADER_LEN:
+        logger.debug(f"{image} does not look like the RPS layout this reads "
+                     f"(magic 0x{magic:04x}, image_size {image_size}, "
+                     f"file {size})")
+        return ""
+
+    build, security, minor, major = head[RPS_VER_A_OFFSET:RPS_VER_A_OFFSET + 4]
+    patch, customer, rom_id, chip_id = \
+        head[RPS_VER_B_OFFSET:RPS_VER_B_OFFSET + 4]
+    # Same field order and formatting the running firmware prints at boot, so
+    # the two can be compared by eye as well as by string.
+    return (f"{chip_id:x}{rom_id:x}.{major}.{minor}.{security}"
+            f".{patch}.{customer}.{build}")
+
+
+def _device_nwp_version(commander, device, serial, port, logger) -> str:
+    """
+    NWP/TA firmware version reported by the attached device, or "".
+
+    Read-only: `mfg917 info` reports the device's configuration, and the JSON
+    form means no output scraping. An empty return covers every way this can go
+    wrong -- no probe, no TA firmware, a Commander too old to report it -- on
+    purpose, because the caller must not act differently on causes it cannot
+    distinguish.
+    """
+    argv = [commander, "mfg917", "info", "-d", device, "--json"]
+    if serial and port:
+        argv += ["--serialinterface", "--serialport", port]
+
+    logger.debug("Reading NWP firmware version: " + " ".join(argv))
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=MFG_INFO_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.debug(f"mfg917 info failed: {e}")
+        return ""
+    if done.returncode != 0:
+        logger.debug(f"mfg917 info returned {done.returncode}")
+        return ""
+
+    try:
+        info = json.loads(done.stdout)["result"]["mfg917_info"]
+    except (ValueError, KeyError, TypeError) as e:
+        logger.debug(f"Cannot parse mfg917 info output: {e}")
+        return ""
+    return str(info.get("nwp_firmware_version", "")).strip()
+
+
+def _menu_action(device_ver: str, bundled_ver: str, logger) -> str:
+    """Ask which images to write. Returns one of FLASH_ACTIONS, or "" to abort."""
+    print("--------------------")
+    print(f" Device NWP firmware : {device_ver or '(unreadable)'}")
+    print(f" Bundled TA firmware : {bundled_ver or '(unreadable)'}")
+    print("--------------------")
+    for i, (_, text) in enumerate(MENU_OPTIONS):
+        print(f"{i + 1}. {text}")
+    print("--------------------")
+    print('Input "q" to exit.')
+    while True:
+        try:
+            key = input("Flash action: ")
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        if key == "q":
+            return ""
+        try:
+            num = int(key)
+        except ValueError:
+            continue
+        if 1 <= num <= len(MENU_OPTIONS):
+            return MENU_OPTIONS[num - 1][0]
+
+
+def _choose_action(commander, device, serial, port, logger) -> str:
+    """
+    Decide what to write. Returns one of FLASH_ACTIONS, or "" to abort.
+
+    Writing the NWP firmware means erasing it first, so every write is a window
+    in which losing power leaves the radio without usable firmware. Doing that
+    on every flash would pay that risk hundreds of times over a day of
+    iteration for no gain, so the default path never touches it: TA is written
+    only when this can see it is needed and a human says so, or when the
+    environment asks for it outright.
+    """
+    forced = os.environ.get(FLASH_ACTION_ENV, "").strip().lower()
+    # SIWX917_FLASH_TA=1 said "write the TA firmware instead of the app" before
+    # there was a menu. Keep it working as a name for that choice.
+    if not forced and os.environ.get("SIWX917_FLASH_TA") == "1":
+        forced = "ta"
+    if forced:
+        if forced not in FLASH_ACTIONS:
+            logger.error(f"{FLASH_ACTION_ENV}={forced} is not one of "
+                         f"{'/'.join(FLASH_ACTIONS)}")
+            return ""
+        logger.info(f"{FLASH_ACTION_ENV}={forced} -- not asking.")
+        return forced
+
+    bundled_ver = _bundled_ta_version(logger)
+    device_ver = _device_nwp_version(commander, device, serial, port, logger)
+
+    if device_ver and bundled_ver and device_ver == bundled_ver:
+        logger.info(f"NWP/TA firmware already {device_ver} -- flashing the "
+                    "application only.")
+        return "app"
+
+    logger.warning("Device NWP/TA firmware does not match what this platform "
+                   "ships, or could not be read.")
+    logger.warning(f"  device : {device_ver or '(unreadable)'}")
+    logger.warning(f"  bundled: {bundled_ver or '(unreadable)'}")
+
+    if not sys.stdin.isatty():
+        # Never block a script waiting for a keypress, and never write the NWP
+        # firmware on a guess: flash the application and say what was skipped.
+        logger.warning("Not a terminal -- flashing the application only. "
+                       f"Set {FLASH_ACTION_ENV}=ta or both to write the TA "
+                       "firmware; the application will not run without it.")
+        return "app"
+
+    return _menu_action(device_ver, bundled_ver, logger)
+
+
 # -----------------------------------------------------------------------------
 #                                 Entry point
 # -----------------------------------------------------------------------------
@@ -266,8 +469,11 @@ def platform_flash(using_data=None,
     Flash a SiWx917 target. Returns {"success": bool, "message": str}.
 
     Channel is auto-detected (see module docstring); -p <port> forces serial.
-    Set SIWX917_FLASH_TA=1 to flash the NWP/TA firmware instead of the app
-    (serial only, and only needed on a fresh or bricked device).
+    The device carries two firmwares: the M4 application built here, and the
+    NWP/TA firmware the radio runs. The application will not get far without a
+    matching TA, so the device's version is read first and, when it does not
+    match the image bundled in mcu/patch, the choice of what to write is put to
+    the user. Set SIWX917_FLASH=app|ta|both to answer that without a prompt.
     """
     using_data = using_data or {}
 
@@ -288,41 +494,43 @@ def platform_flash(using_data=None,
         logger.info(f"-b {baud} is not used: commander offers only its own "
                     "negotiated rate or --fixedspeed, not an arbitrary value.")
 
-    if os.environ.get("SIWX917_FLASH_TA") == "1":
-        ta_port = port or _sole_port(_usb_serial_ports(), logger)
-        if not ta_port:
-            return {"success": False,
-                    "message": "TA firmware needs serial/ISP: pass -p <port>"}
-        ta_image = os.path.join(_platform_root(), TA_FIRMWARE_RELPATH)
-        logger.info("SIWX917_FLASH_TA=1 -- flashing NWP/TA firmware, not the app.")
-        ok = _flash_serial(commander, ta_image, ta_port, device, fixedspeed, logger)
-        return {"success": ok,
-                "message": "" if ok else "TA firmware flash failed"}
-
+    # Settle the channel first: reading the device's NWP firmware version, which
+    # decides what gets written, goes over the same connection.
     if port:
         logger.info(f"Port given ({port}) -- using serial/ISP.")
-        ok = _flash_serial(commander, rps, port, device, fixedspeed, logger)
-        return {"success": ok, "message": "" if ok else "serial/ISP flash failed"}
-
-    # No port: pick the channel ourselves so a bare `tos.py flash` works.
-    if _swd_reachable(commander, device, logger):
+        serial, chosen = True, port
+    elif _swd_reachable(commander, device, logger):
         logger.info("Debug probe reached the chip -- using SWD (no keypress "
                     "needed). Pass -p <port> to force serial/ISP.")
+        serial, chosen = False, ""
+    else:
+        ports = _usb_serial_ports()
+        chosen = _sole_port(ports, logger)
+        if not chosen:
+            logger.error("No way to reach the device: no debug probe responded and "
+                         f"{'no USB serial adapter was found' if not ports else 'the port is ambiguous'}.")
+            logger.error(SWD_HINTS)
+            logger.error(SERIAL_HINTS)
+            return {"success": False, "message": "no usable flash channel found"}
+        serial = True
+        logger.info(f"No debug probe responded -- using serial/ISP on {chosen}.")
+
+    action = _choose_action(commander, device, serial, chosen, logger)
+    if not action:
+        return {"success": False, "message": "flash cancelled"}
+
+    if action in ("ta", "both"):
+        if not _flash_ta(commander, device, serial, chosen, fixedspeed, logger):
+            return {"success": False, "message": "TA firmware flash failed"}
+        if action == "ta":
+            return {"success": True, "message": ""}
+
+    channel = "serial/ISP" if serial else "SWD"
+    if serial:
+        ok = _flash_serial(commander, rps, chosen, device, fixedspeed, logger)
+    else:
         ok = _flash_swd(commander, s37, device, logger)
-        return {"success": ok, "message": "" if ok else "SWD flash failed"}
-
-    ports = _usb_serial_ports()
-    chosen = _sole_port(ports, logger)
-    if not chosen:
-        logger.error("No way to reach the device: no debug probe responded and "
-                     f"{'no USB serial adapter was found' if not ports else 'the port is ambiguous'}.")
-        logger.error(SWD_HINTS)
-        logger.error(SERIAL_HINTS)
-        return {"success": False, "message": "no usable flash channel found"}
-
-    logger.info(f"No debug probe responded -- using serial/ISP on {chosen}.")
-    ok = _flash_serial(commander, rps, chosen, device, fixedspeed, logger)
-    return {"success": ok, "message": "" if ok else "serial/ISP flash failed"}
+    return {"success": ok, "message": "" if ok else f"{channel} flash failed"}
 
 
 def _sole_port(ports: list, logger) -> str:

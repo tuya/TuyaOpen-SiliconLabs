@@ -71,6 +71,37 @@ _slc_clean_path()
     printf '%s' "${clean_path}"
 }
 
+# Give slc an ASCII temp directory on Windows.
+#
+# slc renders templates through JEP, whose embedded CPython opens the render
+# script with the narrow CRT fopen(). That call resolves the path in the ANSI
+# code page (936 on a Chinese-locale Windows), so the script -- staged under
+# java.io.tmpdir, i.e. C:\Users\<non-ASCII name>\AppData\Local\Temp by default
+# -- cannot be opened, and every .jinja fails with "Couldn't open script file".
+# The JVM derives java.io.tmpdir from TMP, so pointing TMP at a directory in the
+# platform's own build tree keeps the path ASCII regardless of the user name.
+# Linux and macOS resolve paths as UTF-8 and need none of this.
+_slc_ascii_tmpdir()
+{
+    local tmp_dir
+
+    case "${OSTYPE-}" in
+        msys* | cygwin* | win32) ;;
+        *)                       return 0 ;;
+    esac
+
+    tmp_dir="$(cygpath -m "${repo_dir}/build/.slc-tmp" 2>/dev/null)" || return 0
+    if printf '%s' "${tmp_dir}" | LC_ALL=C grep -q '[^ -~]'; then
+        echo "WARNING: the platform path is not ASCII (${tmp_dir})." >&2
+        echo "         slc cannot generate templates from here; move the" >&2
+        echo "         TuyaOpen checkout to a path without non-ASCII characters." >&2
+        return 0
+    fi
+
+    mkdir -p "${repo_dir}/build/.slc-tmp" || return 0
+    printf '%s' "${tmp_dir}"
+}
+
 # Wrapper function to execute an slc command
 run_slc()
 {
@@ -91,8 +122,52 @@ run_slc()
         clean_path="${bundled_jre}:${clean_path}"
     fi
 
+    local ascii_tmp tmp_env=""
+    ascii_tmp="$(_slc_ascii_tmpdir)"
+    if [ -n "${ascii_tmp}" ]; then
+        tmp_env="TMP=\"${ascii_tmp}\" TEMP=\"${ascii_tmp}\""
+    fi
+
+    # shellcheck disable=SC2086
     eval env -u VIRTUAL_ENV -u PYTHONHOME -u PYTHONPATH PATH=\"${clean_path}\" \
-        "${slc_cmd}" "${slc_args[*]}"
+        ${tmp_env} "${slc_cmd}" "${slc_args[*]}"
+}
+
+# Locate the launcher inside an slc-cli installation.
+#
+# Name the launchers instead of globbing. Both slc.bat and slc are two-line
+# wrappers around `java -jar slc.jar`, but `find -name 'slc*'` also matches
+# bin/slc-cli/slc-cli.exe -- the Eclipse/Equinox launcher, which is a different
+# program with a different command line entirely (it rejects --version and
+# suggests --verbose). NTFS enumerates bin/ before slc, so on Windows
+# `head -n 1` picked exactly that, and every slc call went to the wrong binary.
+# ext4 happened to order slc first, which is the only reason Linux worked.
+#
+# The executable bit cannot be trusted either: slc.bat arrives without one, so
+# the old `-perm /111` filter dropped the correct Windows entry point from the
+# candidate list before ordering even mattered.
+_slc_find_launcher()
+{
+    local root="$1" names name cand
+    case "${OSTYPE-}" in
+        msys* | cygwin* | win32) names="slc.bat slc" ;;
+        *)                       names="slc slc.bat" ;;
+    esac
+    for name in ${names}; do
+        for cand in "${root}/slc_cli/${name}" "${root}/${name}"; do
+            if [ -f "${cand}" ]; then
+                # The shell wrapper is executed directly; a zip extracted
+                # without permissions would otherwise fail here.
+                case "${cand}" in
+                    *.bat) : ;;
+                    *) [ -x "${cand}" ] || chmod +x "${cand}" 2>/dev/null || true ;;
+                esac
+                printf '%s' "${cand}"
+                return 0
+            fi
+        done
+    done
+    return 1
 }
 
 # Find the command to use for slc
@@ -110,16 +185,15 @@ slc_init()
     else
         echo "Searching for 'slc*' executable in '${SLC_INSTALL_DIR}'"
 
-        # Find the slc executable
-        slc_cmd=$(find "${SLC_INSTALL_DIR}" -perm "$([[ $OSTYPE == darwin* ]] && echo '+' || echo '/')"111 -name 'slc*' -type f | head -n 1)
+        # Find the slc launcher
+        slc_cmd=$(_slc_find_launcher "${SLC_INSTALL_DIR}" || true)
 
         # Automatically download slc if not found
         if [ -z "${slc_cmd}" ]; then
-            echo "-- No 'slc*' executable found. Downloading"
+            echo "-- No slc launcher found. Downloading"
             "${repo_dir}"/script/bootstrap_silabs
 
-            # Find the slc executable
-            slc_cmd=$(find "${SLC_INSTALL_DIR}" -perm "$([[ $OSTYPE == darwin* ]] && echo '+' || echo '/')"111 -name 'slc*' -type f | head -n 1)
+            slc_cmd=$(_slc_find_launcher "${SLC_INSTALL_DIR}" || true)
         fi
 
     fi

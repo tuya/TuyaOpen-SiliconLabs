@@ -164,45 +164,49 @@ do_bootstrap_silabs()
 
 install_arm_toolchain()
 {
-    # ARM publishes one archive per host triple and the wrong one simply will
-    # not execute. Names verified against developer.arm.com for 12.2.rel1:
-    #   Linux x86_64        -> x86_64            .tar.xz
-    #   macOS Intel         -> darwin-x86_64     .tar.xz
-    #   macOS Apple silicon -> darwin-arm64      .tar.xz
-    #   Windows             -> mingw-w64-i686    .zip     (note: not a tarball)
-    local host archive_ext
+    # The toolchain goes into platform/tools/, one level above this platform,
+    # because every TuyaOpen platform shares that directory: T5AI and GD32 both
+    # resolve theirs as ${PLATFORM_PATH}/../tools/<name>, and the CI runner
+    # pre-seeds it with the tarballs. Installing into our own tools/toolchain
+    # meant re-downloading 155 MB that was already sitting right next door.
+    #
+    # Linux and Windows therefore use the same gcc-arm-none-eabi-10.3-2021.10 as
+    # the other platforms, so a seeded tarball is a hit. macOS stays on
+    # arm-gnu-toolchain-12.2: 10.3 ships no native arm64 build and would run
+    # under Rosetta on Apple silicon.
+    local release tarball_name url_base
     case "$(uname -s)" in
         Darwin)
             if [ "$(uname -m)" = "arm64" ]; then
-                host="darwin-arm64"
+                release="arm-gnu-toolchain-12.2.rel1-darwin-arm64-arm-none-eabi"
             else
-                host="darwin-x86_64"
+                release="arm-gnu-toolchain-12.2.rel1-darwin-x86_64-arm-none-eabi"
             fi
-            archive_ext="tar.xz"
+            tarball_name="${release}.tar.xz"
+            url_base="https://developer.arm.com/-/media/Files/downloads/gnu/12.2.rel1/binrel"
             ;;
         MINGW* | MSYS* | CYGWIN*)
-            host="mingw-w64-i686"
-            archive_ext="zip"
+            release="gcc-arm-none-eabi-10.3-2021.10"
+            tarball_name="${release}-win32.zip"
+            url_base="https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu-rm/10.3-2021.10"
             ;;
         *)
-            host="x86_64"
-            archive_ext="tar.xz"
+            release="gcc-arm-none-eabi-10.3-2021.10"
+            if [ "$(uname -m)" = "aarch64" ]; then
+                tarball_name="${release}-aarch64-linux.tar.bz2"
+            else
+                tarball_name="${release}-x86_64-linux.tar.bz2"
+            fi
+            url_base="https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu-rm/10.3-2021.10"
             ;;
     esac
-    local release="arm-gnu-toolchain-12.2.rel1-${host}-arm-none-eabi"
 
-    local url=${1-"https://developer.arm.com/-/media/Files/downloads/gnu/12.2.rel1/binrel/${release}.${archive_ext}"}
+    local url=${1-"${url_base}/${tarball_name}"}
     local extract_dir=${2-"${release}"}
-    local toolchain_dir=${3-""}
+    local toolchain_dir=${3-"${repo_dir}/../tools"}
 
-    # If toolchain_dir is not provided, use /opt if root, else use ~/.local
-    if [ -z "${toolchain_dir}" ]; then
-        toolchain_dir="tools/toolchain"
-    fi
-
-    # Check if the toolchain is already present at the desired location.
-    # The binary carries a .exe on Windows, so testing the bare name there
-    # always misses and the whole 313 MB archive gets fetched again.
+    # Already extracted? The binary carries a .exe on Windows, so testing the
+    # bare name there always misses and the whole archive gets fetched again.
     local gcc_exe="${toolchain_dir}/${extract_dir}/bin/arm-none-eabi-gcc"
     case "$(uname -s)" in
         MINGW* | MSYS* | CYGWIN*) gcc_exe="${gcc_exe}.exe" ;;
@@ -214,28 +218,47 @@ install_arm_toolchain()
     fi
 
     echo 'Installing GNU ARM Embedded Toolchain...'
-
-    # Download
-    local tarball="gcc-arm.${archive_ext}"
     mkdir -p "${toolchain_dir}/${extract_dir}"
-    download_file "${url}" "${toolchain_dir}/${tarball}"
+
+    # Keep the upstream file name, and leave the archive in place afterwards.
+    # That is what lets an already-present tarball be recognised, both here and
+    # on the next run; a generic "gcc-arm.tar.xz" could never match what CI
+    # seeds the shared directory with.
+    local tarball="${toolchain_dir}/${tarball_name}"
+    # Present is not the same as usable. A download killed mid-transfer before
+    # download_file was made atomic, or a bad tarball seeded into the shared
+    # directory, leaves a file that this cache check would honour forever --
+    # skipping the download on every later run and failing in extraction with
+    # "End-of-central-directory signature not found", which names nothing.
+    if [ -f "${tarball}" ] && ! archive_ok "${tarball}"; then
+        echo "Discarding corrupt ${tarball_name}; it will be downloaded again"
+        rm -f "${tarball}"
+    fi
+    if [ -f "${tarball}" ]; then
+        echo "Found ${tarball_name} already present. Skipping download"
+    else
+        download_file "${url}" "${tarball}"
+    fi
 
     # Extract. The Windows build ships as a zip, which has no --strip-components
     # equivalent, so flatten the single top-level directory afterwards instead.
-    if [ "${archive_ext}" = "zip" ]; then
-        local staging="${toolchain_dir}/.unzip-${extract_dir}"
-        rm -rf "${staging}"
-        extract_zip "${toolchain_dir}/${tarball}" "${staging}"
-        local inner
-        inner=$(find "${staging}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-        if [ -z "${inner}" ]; then
-            die "unexpected layout inside ${tarball}"
-        fi
-        cp -R "${inner}/." "${toolchain_dir}/${extract_dir}/"
-        rm -rf "${staging}"
-    else
-        tar xf "${toolchain_dir}/${tarball}" --directory "${toolchain_dir}/${extract_dir}" --strip-components=1
-    fi
+    case "${tarball_name}" in
+        *.zip)
+            local staging="${toolchain_dir}/.unzip-${extract_dir}"
+            rm -rf "${staging}"
+            extract_zip "${tarball}" "${staging}"
+            local inner
+            inner=$(find "${staging}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+            if [ -z "${inner}" ]; then
+                die "unexpected layout inside ${tarball_name}"
+            fi
+            cp -R "${inner}/." "${toolchain_dir}/${extract_dir}/"
+            rm -rf "${staging}"
+            ;;
+        *)
+            tar xf "${tarball}" --directory "${toolchain_dir}/${extract_dir}" --strip-components=1
+            ;;
+    esac
 
     # Link if root
     if [ "$EUID" -eq 0 ]; then
@@ -250,9 +273,6 @@ install_arm_toolchain()
         echo ""
         set -x
     fi
-
-    # Cleanup
-    rm -rf "${toolchain_dir:?}/${tarball:?}"
 }
 
 install_jre()

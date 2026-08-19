@@ -5,8 +5,6 @@ import os
 import platform
 import shutil
 import subprocess
-import requests
-from git import Git
 
 # "linux", "darwin_x86", "darwin_arm64", "windows"
 SYSTEM_NAME = ""
@@ -85,7 +83,7 @@ def do_subprocess_argv(argv, cwd=None) -> int:
     cmd.exe. When the line both starts with a quote and contains more quotes,
     cmd.exe strips the outermost pair, so
 
-        "C:\\...\\python.exe" -c "import jinja2"
+        "C:\\...\\python.exe" -c "import sys"
 
     arrives split in the wrong place and fails. Passing the arguments as a
     list avoids quoting rules entirely, on every OS.

@@ -1,7 +1,10 @@
-cmake~=3.26.3
-Jinja2~=3.1.2
-GitPython~=3.1.31
-PyYAML~=6.0
-yapf~=0.40.2
-numpy~=2.2.6
-requests~=2.32.0
+# Nothing beyond TuyaOpen's own pyproject.toml, which already pins cmake,
+# ninja, GitPython, PyYAML and requests for every platform. Repeating them here
+# re-resolves the shared .venv and silently downgrades it -- `cmake~=3.26.3`
+# used to pull the tree back from the 4.0.2 the SDK asks for, for every
+# platform built afterwards in the same workspace.
+#
+# Jinja2 is not listed either: it is slc's template engine, and slc renders
+# templates with the CPython it bundles under tools/slc, never with this .venv.
+# That interpreter ships Jinja2 itself (3.1.2 as of slc 5.11.0.0), and no code
+# in this platform imports jinja2.

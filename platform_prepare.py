@@ -120,9 +120,8 @@ def need_prepare(root, prepare_file, target):
             libs_need_prepare.append(name)
             result = True
 
-    toolchain_path = os.path.join(root, "tools/toolchain")
-    if not os.path.exists(toolchain_path):
-        print("Tools path not exists, need prepare.")
+    if not _toolchain_installed(root):
+        print("ARM toolchain not found, need prepare.")
         result = True
     if not _slc_installed(root):
         print("SLC CLI not found, need prepare.")
@@ -155,105 +154,28 @@ def _slc_installed(root):
     return False
 
 
-def _slc_bundled_python(root):
+def _toolchain_installed(root):
     """
-    Locate the CPython that SLC embeds to render its Jinja templates.
+    Return True if an extracted bare-metal ARM toolchain sits in the shared
+    platform/tools directory.
 
-    The interpreter's place differs by host -- CPython on Windows keeps
-    python.exe at the top of the distribution while the Unix builds put a
-    version-named binary under bin/ -- so probe instead of naming one path. A
-    hardcoded bin/python3.10 silently matched nothing on Windows, and the only
-    symptom was slc generate reporting "Couldn't open script file" for every
-    template long afterwards.
-
-    return: path to the interpreter, or None
+    Looks for the compiler rather than the directory: platform/tools is shared
+    with every other platform and CI pre-seeds it with tarballs, so the
+    directory is there long before anything has been unpacked into it.
     """
     import glob
-
-    base = os.path.join(root, "tools", "slc", "slc_cli", "bin", "slc-cli",
-                        "developer", "adapter_packs", "python")
-    candidates = [
-        os.path.join(base, "bin", "python3"),   # Unix, unversioned
-    ]
-    # Windows layout is unverified against a real install, so accept the
-    # interpreter at either level rather than betting on one.
-    candidates += sorted(glob.glob(os.path.join(base, "python*.exe")))
-    candidates += sorted(glob.glob(os.path.join(base, "bin", "python*.exe")))
-    # Versioned Unix names last, newest first, so a version bump still resolves.
-    candidates += sorted(
-        glob.glob(os.path.join(base, "bin", "python3.[0-9]*")), reverse=True)
-
-    for path in candidates:
-        # bin/ also holds python3.10-config and friends, which are not
-        # interpreters.
-        if "config" in os.path.basename(path):
-            continue
-        if os.path.isfile(path):
-            return path
-    return None
-
-
-def _ensure_jinja2(root):
-    """
-    SLC template generation needs Jinja2 in BOTH:
-    - the active interpreter (TuyaOpen .venv may be first on PATH)
-    - SLC's bundled Python under tools/slc
-    """
-    pythons = []
-    # Active interpreter
-    pythons.append(sys.executable)
-    # Common PATH names
-    import shutil
-    for name in ("python3", "python"):
-        p = shutil.which(name)
-        if p:
-            pythons.append(p)
-    # SLC bundled Python
-    slc_py = _slc_bundled_python(root)
-    if slc_py:
-        pythons.append(slc_py)
-    else:
-        # Say so rather than skipping quietly. Without Jinja2 in this
-        # interpreter, slc generate fails much later with "Couldn't open script
-        # file" against each template and names nothing else.
-        print("WARNING: SLC's bundled Python was not found; "
-              "template generation will fail if it lacks Jinja2")
-
-    # Unique preserve order
-    seen = set()
-    uniq = []
-    for p in pythons:
-        if p and p not in seen:
-            seen.add(p)
-            uniq.append(p)
-
-    # Argument lists, not command strings: the interpreter path holds spaces on
-    # Windows ("C:\\Users\\...\\.venv\\Scripts\\python.exe") and quoting it inside
-    # a string that cmd.exe then re-parses breaks the command apart. See
-    # do_subprocess_argv in script/util.py.
-    for py in uniq:
-        check = [py, "-c", "import jinja2"]
-        if do_subprocess_argv(check) == 0:
-            continue
-        print(f"Jinja2 missing in {py}; installing ...")
-        # Prefer ensurepip+pip on that exact interpreter
-        do_subprocess_argv([py, "-m", "ensurepip", "--upgrade"])
-        if do_subprocess_argv([py, "-m", "pip", "install", "Jinja2~=3.1.2"]) != 0:
-            # Fallback for uv-managed envs without pip module
-            if do_subprocess_argv(
-                    ["uv", "pip", "install", "--python", py, "Jinja2~=3.1.2"]) != 0:
-                print(f"ERROR: Failed to install Jinja2 for {py}")
-                return False
-        if do_subprocess_argv(check) != 0:
-            print(f"ERROR: Jinja2 still missing for {py}")
-            return False
-    return True
+    shared = os.path.join(root, os.pardir, "tools")
+    for pattern in ("gcc-arm-none-eabi-*", "arm-gnu-toolchain-*-arm-none-eabi"):
+        for path in glob.glob(os.path.join(shared, pattern)):
+            for exe in ("arm-none-eabi-gcc", "arm-none-eabi-gcc.exe"):
+                if os.path.isfile(os.path.join(path, "bin", exe)):
+                    return True
+    return False
 
 
 def download_tools(root, prepare_file):
     print("Downloading Tools...")
-    toolchain_path = os.path.join(root, "tools/toolchain")
-    need_toolchain = not os.path.exists(toolchain_path)
+    need_toolchain = not _toolchain_installed(root)
     need_slc = not _slc_installed(root)
 
     if need_toolchain:
@@ -272,8 +194,6 @@ def download_tools(root, prepare_file):
         print("Install manually: cd platform/SiWx917 && ./script/bootstrap silabs")
         return False
 
-    if not _ensure_jinja2(root):
-        return False
     return True
 
 
@@ -353,11 +273,6 @@ def download_sdk(root, prepare_file, prepare_libs):
 def platform_prepare(root, target):
     prepare_file = os.path.join(root, ".prepare")
     prepare_flag, prepare_libs = need_prepare(root, prepare_file, target)
-
-    # Always ensure Jinja2 for SLC template generation (even if SDKs already prepared).
-    if not _ensure_jinja2(root):
-        print("Install Jinja2 failed.")
-        return False
 
     if not prepare_flag:
         print("No need prepare.")

@@ -49,6 +49,14 @@ download_file()
     local url="$1"
     local dest="$2"
 
+    # Land the file only once it is whole. curl and wget both leave whatever
+    # arrived behind when a transfer dies, so writing straight to ${dest} means
+    # a failed download is indistinguishable from a finished one -- and a
+    # caller that recognises an already-present archive takes the truncated
+    # remains for a cache hit, forever.
+    local part="${dest}.part"
+    rm -f "${part}"
+
     # These archives run to hundreds of MB (Commander alone is 194 MB), long
     # enough that a connection reset mid-transfer is a normal event rather than
     # an edge case -- one was observed dying at 78.9% with curl: (56). Plain
@@ -67,12 +75,57 @@ download_file()
         fi
         # shellcheck disable=SC2086
         curl -fL --retry 4 ${retry_all} --retry-delay 3 \
-            --progress-bar -o "${dest}" "${url}"
+            --progress-bar -o "${part}" "${url}" \
+            || { rm -f "${part}"; return 1; }
     elif command -v wget > /dev/null 2>&1; then
-        wget --tries 4 --waitretry 3 "${url}" -O "${dest}"
+        wget --tries 4 --waitretry 3 "${url}" -O "${part}" \
+            || { rm -f "${part}"; return 1; }
     else
         die "neither curl nor wget is available to download ${url}"
     fi
+
+    mv -f "${part}" "${dest}"
+}
+
+
+# Whether an archive can be read end to end, for a caller deciding whether an
+# already-present file is a usable cache entry.
+#
+# Undecidable is not the same as corrupt: when nothing on the host can test the
+# archive, report it good. Discarding a sound one costs a few hundred MB of
+# re-download, which is a worse trade than trusting a file that is almost
+# always fine.
+archive_ok()
+{
+    local archive="$1"
+    local py="" candidate
+
+    case "${archive}" in
+        *.zip)
+            # unzip is not guaranteed here, for the same reason extract_zip
+            # carries a Python path: the CI runner has none.
+            if command -v unzip > /dev/null 2>&1; then
+                unzip -qt "${archive}" > /dev/null 2>&1 || return 1
+                return 0
+            fi
+            for candidate in python3 python; do
+                if command -v "${candidate}" > /dev/null 2>&1; then
+                    py="${candidate}"
+                    break
+                fi
+            done
+            [ -n "${py}" ] || return 0
+            "${py}" -c \
+                'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).testzip()' \
+                "${archive}" > /dev/null 2>&1 || return 1
+            ;;
+        *)
+            command -v tar > /dev/null 2>&1 || return 0
+            tar tf "${archive}" > /dev/null 2>&1 || return 1
+            ;;
+    esac
+
+    return 0
 }
 
 # unzip is not guaranteed: the CI runner has none, and script/bootstrap now

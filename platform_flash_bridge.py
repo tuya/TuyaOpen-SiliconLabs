@@ -28,9 +28,15 @@ held in ISP mode (SWO/GPIO_34 tied low disables the debug interface) -- so the
 fallback lands correctly instead of guessing from USB IDs.
 
 A .rps is never handed to `flash` and a .s37 is never handed to `serial load`;
-see _guard_channel(). The NWP/TA (wireless coprocessor) firmware is only
-reflashed when provisioning a fresh board or recovering a corrupted one, so it
-is opt-in via SIWX917_FLASH_TA=1 rather than something this can do by accident.
+see _guard_channel().
+
+The NWP/TA (wireless coprocessor) firmware is a separate image, and writing it
+erases the radio's flash: an interrupted write has left a board needing
+recovery. So it is written only when the device reports having none, or when
+SIWX917_FLASH asks for it outright -- never to "repair" firmware that is merely
+different, and never over SWD, which has no working path for it. When a device
+flashes cleanly and the radio still will not start, the answer is usually not a
+rewrite; see BOOT_FAILURE_HINTS and script/siwx917_kermit.sh.
 
 This module is loaded by importlib.util.spec_from_file_location() under a
 synthetic module name, so its package context is not set up and it cannot
@@ -78,14 +84,17 @@ MFG_INFO_TIMEOUT = 30
 # Where the version sits inside an RPS header, and what has to hold for the
 # header to be one at all.
 #
-# Reverse-engineered, not documented: commander offers no way to read a version
-# out of an .rps (rps has only convert/create/load/sign), so the layout was
-# derived by matching the bundled TA image against what `mfg917 info` reported
-# for a board carrying it -- all eight fields agreed, across two separate
-# offsets. Treat it as a strong guess rather than a specification: check the
-# structure first and report the version as unknown when anything is off,
-# because the only thing acting on a wrong answer could do is overwrite a good
-# NWP firmware.
+# Undocumented but cross-checked against labels Silicon Labs wrote themselves:
+# commander cannot read a version out of an .rps (rps offers only convert /
+# create / load / sign), so the layout was derived by decoding the bundled image
+# and comparing with what a board carrying it reports. It then reproduced the
+# versions the SDK spells out in its own file names --
+# connectivity_firmware/standard/SiWG917-B.2.15.5.0.0.2.rps decodes to
+# 2.15.5.0.0.2, and the lite image likewise -- so three images agree, two of
+# them against vendor-authored ground truth.
+#
+# Still check the structure first and report unknown on any mismatch. A wrong
+# answer here can only lead to overwriting a good NWP firmware.
 RPS_HEADER_LEN = 64
 RPS_MAGIC_OFFSET = 4          # uint16 LE, 0x900D
 RPS_MAGIC = 0x900D
@@ -120,6 +129,35 @@ SWD_HINTS = """  SWD troubleshooting:
     - SWCLK on GPIO_31, SWDIO on GPIO_33?
     - SWO / GPIO_34 tied low holds the chip in ISP mode, which
       disables the debug interface -- release it for SWD."""
+
+# Printed after a TA write, and named by the boot-failure hint below. Both
+# point at script/siwx917_kermit.sh, which talks to the ROM bootloader menu
+# directly -- the only place that can tell a stored image apart from a bootable
+# one, and the only place that can repair the default-image selector.
+TA_AFTER_WRITE = """  The transfer finished, which is not the same as a radio that starts.
+  Reset the board and check the application log for:
+      WiFi initialization success
+      Running TA fw: <version>
+  If it still reports 16056 or 16059, see the boot-failure hints below."""
+
+# Symptom-to-action for a device that flashes cleanly and does not run. Written
+# from a real recovery: the stored image was intact and the default-image
+# selector was not, so every attempt to rewrite 1.6 MB of firmware was wasted.
+BOOT_FAILURE_HINTS = """  Application starts but the radio does not:
+      WiFi initialization error 16056   no valid NWP firmware selected/present
+      WiFi initialization error 16059   NWP never answered at all
+      Failed to bring m4_ta_secure_handshake: 0x7   (timeout, follows either)
+
+    Do not reach for a firmware rewrite first -- `mfg917 info` reporting an
+    nwp_firmware_version proves only that metadata exists, not that the image
+    is intact or selected. Ask the ROM bootloader instead:
+
+      script/siwx917_kermit.sh check      per-slot integrity, read-only
+      script/siwx917_kermit.sh select-ta 0    point the default at a good slot
+
+    A slot that passes integrity while the device reports 16056 means the
+    default-image selector is what broke; select-ta fixes it in a few bytes.
+    Only when no slot passes is `send` (or SIWX917_FLASH=ta) the right answer."""
 
 SERIAL_HINTS = """  Serial/ISP troubleshooting:
     - chip must be in ISP mode: SWO / GPIO_34 low, then Reset
@@ -278,26 +316,41 @@ def _flash_swd(commander, image, device, logger) -> bool:
 
 def _flash_ta(commander, device, serial, port, fixedspeed, logger) -> bool:
     """
-    Write the bundled NWP/TA firmware.
+    Write the bundled NWP/TA firmware. Serial/ISP only.
 
-    Two channels, two commands. Over serial this is the same `serial load` the
-    application takes, because both are .rps images going through the ISP
-    bootloader. Over SWD it is `rps load`, which is what Commander provides for
-    putting an NWP image on a device -- not plain `flash`, which is a raw flash
-    writer and knows nothing about the image it is handed.
+    Commander offers three ways to put an .rps on a device and none of them
+    works over SWD. Measured on a device whose NWP would not start:
+
+      rps load     exits 0, logs a clean write, changes nothing -- the worst
+                   kind of failure, since it reports success
+      flash        fails at "Waiting for bootloader to perform upgrade"
+      mfg917
+      fwupgrade    refuses to run without --serialinterface, despite listing
+                   --tif SWD|JTAG among its global options
+
+    All three hand the image to a program running on the chip, which is what
+    finalises the install. `serial load` is the one that reaches it: it is the
+    only path observed to announce "Initializing NWP firmware upgrade".
     """
     image = os.path.join(_platform_root(), TA_FIRMWARE_RELPATH)
     if not _check_image(image, logger):
         return False
 
-    if serial:
-        return _flash_serial(commander, image, port, device, fixedspeed, logger)
+    if not serial:
+        logger.error("NWP/TA firmware can only be written over serial/ISP; "
+                     "SWD has no working path for it. Pass -p <port> and put "
+                     "the chip in ISP mode.")
+        logger.error(SERIAL_HINTS)
+        return False
 
-    logger.info(f"Loading NWP/TA firmware over SWD: {os.path.basename(image)}")
-    if _run([commander, "rps", "load", image, "-d", device], logger):
-        return True
-    logger.error(SWD_HINTS)
-    return False
+    if not _flash_serial(commander, image, port, device, fixedspeed, logger):
+        logger.error(BOOT_FAILURE_HINTS)
+        return False
+
+    # A completed transfer is not a working radio. Say so rather than letting
+    # "Platform flash success" imply more than it can.
+    logger.warning(TA_AFTER_WRITE)
+    return True
 
 
 # -----------------------------------------------------------------------------
@@ -424,8 +477,7 @@ def _choose_action(commander, device, serial, port, logger) -> str:
 
     logger.warning("Could not read the device's NWP/TA firmware version, so "
                    "this will not write one: flashing the application only.")
-    logger.warning("If the application does not start, the radio may have no "
-                   f"firmware. Write it with {FLASH_ACTION_ENV}=both.")
+    logger.warning(BOOT_FAILURE_HINTS)
     return "app"
 
 

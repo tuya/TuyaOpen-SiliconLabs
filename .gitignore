@@ -6,3 +6,5 @@ sdks
 TuyaOpen
 .prepare
 *__pycache__*
+# siwx917_kermit.sh writes its interaction logs next to itself.
+script/siwx917-logs/

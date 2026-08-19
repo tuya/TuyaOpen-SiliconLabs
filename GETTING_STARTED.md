@@ -194,20 +194,40 @@ Firmware artifacts are under the app `dist/` / `.build/` directories.
 
 ## Next Steps
 
-### 0. Flash TA firmware (required once per device)
+### 0. TA (NWP) firmware — check before writing
 
-Before flashing the M4 application firmware, flash the TA firmware patch **once**
-on each new SiWx917 board. Skip only if TA with the matching patch is already on
-the device. Wi-Fi/BLE will not work correctly with this port until it is done.
+The radio runs its own firmware, separate from the M4 application built here,
+and the application cannot start without it. Boards normally arrive with it
+already programmed, so **check first and write only if you have to**: writing it
+erases the NWP region, and an interrupted write has left a board needing
+recovery.
+
+`tos.py flash` reads the device's version and writes TA only when the device
+reports having none. To look yourself:
 
 ```bash
-cd ~/TuyaOpen
-platform/SiWx917/tools/commander/commander flash \
-  platform/SiWx917/mcu/patch/RS9117_WC_SI.rps \
-  --device SiWG917M111MGTBA
+cd platform/SiWx917
+tools/commander/commander mfg917 info -d SiWG917M111MGTBA --json
 ```
 
-Adjust `--device` if your target part number differs.
+`nwp_firmware_version` in that output means an image is *stored*. It does not
+mean the image is intact, nor that it is the one the boot process will load --
+both were observed false on a device reporting a perfectly normal version. When
+the application starts but the radio does not, go to
+[Recovering a device whose radio will not start](#recovering-a-device-whose-radio-will-not-start).
+
+To write it deliberately, over serial/ISP (see that section for wiring):
+
+```bash
+SIWX917_FLASH=ta tos.py flash -p /dev/ttyUSB0
+```
+
+SWD has no working path for TA firmware. Measured on a device whose radio would
+not start: `commander rps load` exits 0 and changes nothing, `commander flash`
+fails at *Waiting for bootloader to perform upgrade*, and `commander mfg917
+fwupgrade` refuses to run without `--serialinterface`. All three hand the image
+to a program on the chip that finalises the install, and only the serial path
+reaches it.
 
 ### 1. Flash M4 application firmware
 
@@ -262,7 +282,67 @@ Then call `tkl_system_print_task_stats()` from your application.
 - Large static buffers can use `TUYA_MEM_SECTION_RAM` / `TUYA_MEM_SECTION_PSRAM` (`tuya_mem_section.h`). The section names carry **no** leading dot and the linker scripts must match exactly, or the input section is silently orphaned
 - **Anti-stutter (latest TuyaOpen):** keep large `AI_*_RINGBUF_SIZE` in board config; enable both `ENABLE_EXT_RAM` (AI path) and `CONFIG_SPIRAM` (adapter). Latest defaults (20KB) are too small for voice.
 
+## Recovering a device whose radio will not start
+
+The application boots and prints one of these, then gets no further:
+
+```
+[tuyaos][E][app_tuya.c] WiFi initialization error 16056    SL_STATUS_VALID_FIRMWARE_NOT_PRESENT
+[tuyaos][E][app_tuya.c] WiFi initialization error 16059    SL_STATUS_CARD_READY_TIMEOUT
+[tuyaos][I][app_tuya.c] Failed to bring m4_ta_secure_handshake: 0x7   (timeout)
+```
+
+**Do not start by rewriting the firmware.** On a real recovery the stored image
+was intact and rewriting it three different ways -- 1.6 MB each time -- fixed
+nothing, because what had broken was the bootloader's record of *which* image to
+load. Ask the ROM bootloader instead; it can answer both questions and repair
+the second in a few bytes.
+
+Wire the ISP UART and put the chip in ISP mode:
+
+| Adapter | → | Chip | GPIO | Package pin |
+|---|---|---|---|---|
+| TX | → | RX | GPIO_8 | A20 |
+| RX | ← | TX | GPIO_9 | A21 |
+| GND | — | GND | — | — |
+
+ISP mode: hold GPIO_34 (`JTAG_TDO_SWO`, pin B15) low, tap Reset, release. The
+chip samples that pin as reset is released. Holding it low also disables SWD, so
+release it before going back to a debug probe. Note the log UART is a *different*
+pair -- GPIO_30/GPIO_29 -- so `tos.py monitor` and this cannot share wires.
+
+Then:
+
+```bash
+cd platform/SiWx917
+
+# read-only: per-slot integrity of the 16 wireless-firmware slots
+script/siwx917_kermit.sh check ttyUSB0
+
+# a slot passes but the device still reports 16056 -> the default-image
+# selector is what broke. Points it at that slot; writes a few bytes.
+script/siwx917_kermit.sh select-ta 0 ttyUSB0
+
+# no slot passes -> the image really is gone; transfer it (about 85 s)
+script/siwx917_kermit.sh send mcu/patch/RS9117_WC_SI.rps ttyUSB0
+```
+
+Release GPIO_34, power-cycle, and check the log again. A recovered device
+prints:
+
+```
+WiFi initialization success
+m4_ta_secure_handshake success
+Running TA fw: 1611.2.1.1.255.11.63
+```
+
+`script/siwx917_kermit.sh` with no arguments lists its other modes (`ports`,
+`raw`, `probe`, `menu`, `menu-ta`). `probe` prints the full ROM bootloader menu,
+which is worth reading once: it also offers M4-side integrity checks, image
+pairing, and a baud-rate change.
+
 ## Additional Resources
 
 - [TuyaOpen](https://github.com/tuya/TuyaOpen)
 - [TuyaOpen-SiliconLabs](https://github.com/tuya/TuyaOpen-SiliconLabs)
+- [AN1431: SiWx917 SoC Firmware Update](https://docs.silabs.com/wifi-application-notes/latest/wifi-siwx917-soc-firmware-update-application-note/update-mechanisms)

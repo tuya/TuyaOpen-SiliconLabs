@@ -71,6 +71,37 @@ _slc_clean_path()
     printf '%s' "${clean_path}"
 }
 
+# Give slc an ASCII temp directory on Windows.
+#
+# slc renders templates through JEP, whose embedded CPython opens the render
+# script with the narrow CRT fopen(). That call resolves the path in the ANSI
+# code page (936 on a Chinese-locale Windows), so the script -- staged under
+# java.io.tmpdir, i.e. C:\Users\<non-ASCII name>\AppData\Local\Temp by default
+# -- cannot be opened, and every .jinja fails with "Couldn't open script file".
+# The JVM derives java.io.tmpdir from TMP, so pointing TMP at a directory in the
+# platform's own build tree keeps the path ASCII regardless of the user name.
+# Linux and macOS resolve paths as UTF-8 and need none of this.
+_slc_ascii_tmpdir()
+{
+    local tmp_dir
+
+    case "${OSTYPE-}" in
+        msys* | cygwin* | win32) ;;
+        *)                       return 0 ;;
+    esac
+
+    tmp_dir="$(cygpath -m "${repo_dir}/build/.slc-tmp" 2>/dev/null)" || return 0
+    if printf '%s' "${tmp_dir}" | LC_ALL=C grep -q '[^ -~]'; then
+        echo "WARNING: the platform path is not ASCII (${tmp_dir})." >&2
+        echo "         slc cannot generate templates from here; move the" >&2
+        echo "         TuyaOpen checkout to a path without non-ASCII characters." >&2
+        return 0
+    fi
+
+    mkdir -p "${repo_dir}/build/.slc-tmp" || return 0
+    printf '%s' "${tmp_dir}"
+}
+
 # Wrapper function to execute an slc command
 run_slc()
 {
@@ -91,8 +122,15 @@ run_slc()
         clean_path="${bundled_jre}:${clean_path}"
     fi
 
+    local ascii_tmp tmp_env=""
+    ascii_tmp="$(_slc_ascii_tmpdir)"
+    if [ -n "${ascii_tmp}" ]; then
+        tmp_env="TMP=\"${ascii_tmp}\" TEMP=\"${ascii_tmp}\""
+    fi
+
+    # shellcheck disable=SC2086
     eval env -u VIRTUAL_ENV -u PYTHONHOME -u PYTHONPATH PATH=\"${clean_path}\" \
-        "${slc_cmd}" "${slc_args[*]}"
+        ${tmp_env} "${slc_cmd}" "${slc_args[*]}"
 }
 
 # Locate the launcher inside an slc-cli installation.

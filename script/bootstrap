@@ -51,25 +51,6 @@ install_packages_rpm()
     echo 'rpm not supported currently' && false
 }
 
-install_packages_brew()
-{
-    echo 'Installing script dependencies...'
-
-    brew_packages=(
-        ccache
-        coreutils
-        git
-        git-lfs
-        grep
-        ninja
-        openjdk@21
-        unzip
-        wget
-        bzip2
-    )
-    brew install "${brew_packages[@]}"
-}
-
 install_packages_source()
 {
     echo 'source not supported currently' && false
@@ -82,6 +63,19 @@ install_packages_pip3()
 
 install_packages()
 {
+    # Homebrew is deliberately not consulted: nothing here installs system
+    # packages on a Mac. Everything the rest of the bootstrap uses is either
+    # part of the Command Line Tools (git, tar, curl, python3), fetched into the
+    # repo the way every other tool is (install_jre -> tools/jre), or pinned by
+    # TuyaOpen's own pyproject.toml and delivered through .venv (cmake, ninja).
+    #
+    # A Mac without Homebrew already bootstrapped fine through the check below,
+    # so installing ten formulas when Homebrew happens to be present made the
+    # host change while the build did not: brew's openjdk is keg-only and never
+    # becomes `java`, ccache is wired into no build file here, coreutils and
+    # grep install as gsed/ggrep and shadow nothing, and wget and unzip both
+    # have fallbacks in script/util. This is also the only place in TuyaOpen
+    # that would install system packages at all -- no other platform does.
     PM=source
     if command -v apt-get; then
         PM=apt
@@ -89,11 +83,10 @@ install_packages()
         PM=rpm
     elif command -v opkg; then
         PM=opkg
-    elif command -v brew; then
-        PM=brew
     fi
 
-    # Two situations where nothing can be installed here:
+    # Three situations where nothing is installed here:
+    #   - macOS, by the choice above
     #   - no package manager at all (Windows under Git Bash leaves PM=source,
     #     and install_packages_source just fails)
     #   - apt but sudo wants a password, as on a CI runner; `sudo apt-get`
@@ -103,9 +96,13 @@ install_packages()
     # Carrying on is usually right, since those hosts normally already have
     # what is needed. But carrying on blindly only moves the failure to an
     # error that says nothing about the cause, so check what the rest of the
-    # bootstrap actually uses and stop here naming anything absent.
+    # bootstrap actually uses and stop here naming anything absent. Naming it
+    # and stopping leaves the choice of what to install on the host with the
+    # person who owns the host.
     local skip_reason=""
-    if [ "${PM}" = "source" ]; then
+    if [ "$(uname -s)" = "Darwin" ]; then
+        skip_reason="this script installs no system packages on macOS"
+    elif [ "${PM}" = "source" ]; then
         skip_reason="no supported package manager on this host"
     elif [ "${PM}" = "apt" ] && ! sudo -n true 2> /dev/null; then
         skip_reason="sudo is not available without a password"
@@ -315,8 +312,8 @@ install_jre()
     # com.silabs.ss.framework.uc.extension among them -- so a 17 runtime cannot
     # load them. It fails as an UnsupportedClassVersionError that slc reports
     # only as "An error has occurred. See the log file", which is what made a
-    # CI run spend 51 minutes to say nothing. install_packages_apt already asks
-    # for openjdk-21; the openjdk@17 on the brew list is the stale entry.
+    # CI run spend 51 minutes to say nothing. install_packages_apt asks for
+    # openjdk-21 for the same reason.
     local os arch ext
     case "$(uname -s)" in
         Darwin) os="mac" ext="tar.gz" ;;

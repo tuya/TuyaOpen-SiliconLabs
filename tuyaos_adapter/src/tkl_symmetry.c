@@ -22,11 +22,16 @@
  * --------------------------------------------------------------------------- */
 
 /* The GCM engine reads/writes ciphertext and tag as one contiguous block, so it
- * needs a scratch buffer. It is allocated per call rather than shared: TLS runs
- * from several tasks (AI channel, MQTT, OTA) and one shared buffer would be
- * corrupted by concurrent use. Per-call sizing also removes the fixed cap, so
- * records larger than a few KB still get hardware acceleration.
- * PSRAM is preferred to keep large transient buffers out of internal SRAM. */
+ * needs a scratch buffer. It is allocated per call rather than shared so that
+ * concurrent callers cannot corrupt each other, and so the size is not capped.
+ * PSRAM is preferred to keep large transient buffers out of internal SRAM.
+ *
+ * These entry points are not on the TLS path: with ENABLE_PLATFORM_AES the only
+ * callers of tal_aes_gcm_encode/decode are the AI image and video paths in
+ * src/tuya_ai_service/. Note the NWP caps a crypto request at
+ * SL_SI91X_MAX_DATA_SIZE_IN_BYTES (1400) and the header warns the M4 receive
+ * buffer has the same limit, so ciphertext||tag above that is rejected by the
+ * hardware rather than split here. */
 #if defined(CONFIG_SPIRAM)
 #define GCM_SCRATCH_MALLOC(size) tkl_system_psram_malloc(size)
 #define GCM_SCRATCH_FREE(ptr)    tkl_system_psram_free(ptr)
@@ -211,7 +216,9 @@ OPERATE_RET tkl_aes_gcm_encode(const uint8_t *key, uint32_t key_len, const uint8
     /* Engine writes ciphertext||tag contiguously; the caller keeps them apart. */
     scratch = (uint8_t *)GCM_SCRATCH_MALLOC(input_len + tag_len);
     if (scratch == NULL) {
-        /* Not an error: the caller falls back to the software implementation. */
+        /* There is no software fallback to reach: ENABLE_PLATFORM_AES compiles
+           the mbedtls tkl_aes_gcm_* out entirely, and tal_aes_gcm_* forwards
+           straight here. The caller gets the error. */
         return OPRT_NOT_SUPPORTED;
     }
 
@@ -273,7 +280,9 @@ OPERATE_RET tkl_aes_gcm_decode(const uint8_t *key, uint32_t key_len, const uint8
     /* Engine expects ciphertext||tag as one message; the caller keeps them apart. */
     scratch = (uint8_t *)GCM_SCRATCH_MALLOC(input_len + tag_len);
     if (scratch == NULL) {
-        /* Not an error: the caller falls back to the software implementation. */
+        /* There is no software fallback to reach: ENABLE_PLATFORM_AES compiles
+           the mbedtls tkl_aes_gcm_* out entirely, and tal_aes_gcm_* forwards
+           straight here. The caller gets the error. */
         return OPRT_NOT_SUPPORTED;
     }
 

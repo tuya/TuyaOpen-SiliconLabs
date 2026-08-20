@@ -290,21 +290,17 @@ OPERATE_RET tkl_flash_get_one_type_info(TUYA_FLASH_TYPE_E type, TUYA_FLASH_BASE_
  */
 int tuya_iot_license_read(tuya_iot_license_t *license)
 {
-#if 1
     TKL_UNUSED(license);
 
+    /* SiWx917 has no factory OTP license region. The device credentials come
+     * from KV (written by the `auth` CLI command) or from tuya_config.h, both
+     * of which the upper layers read on their own -- so there is nothing to
+     * hand back here.
+     *
+     * Do not reintroduce a hard-coded uuid/authkey pair for bring-up. Real
+     * credentials in source get committed, published, and reused across
+     * boards; use `auth` on the device instead. */
     return OPRT_NOT_SUPPORTED;
-#else
-    static tuya_iot_license_t li = {
-        .authkey = "sT3ZhgoSCqfemHVm2SOTr0AwS8qJWXaH",
-        .uuid    = "uuid9174d443ed9fcd5c",
-    };
-
-    license->authkey = li.authkey;
-    license->uuid    = li.uuid;
-
-    return OPRT_OK;
-#endif
 }
 
 /**

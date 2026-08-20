@@ -56,7 +56,7 @@ git --version
 │   └── SiWx917/                     # this platform repository
 │       ├── tuyaos_adapter/
 │       ├── mcu/
-│       │   └── patch/RS9117_WC_SI.rps   # TA patch (flash once per device)
+│       │   └── patch/RS9117_WC_SI.rps   # TA firmware (flash once per device)
 │       ├── slc/
 │       └── tools/
 └── export.sh
@@ -194,20 +194,56 @@ Firmware artifacts are under the app `dist/` / `.build/` directories.
 
 ## Next Steps
 
-### 0. Flash TA firmware (required once per device)
+### 0. TA (NWP) firmware — check before writing
 
-Before flashing the M4 application firmware, flash the TA firmware patch **once**
-on each new SiWx917 board. Skip only if TA with the matching patch is already on
-the device. Wi-Fi/BLE will not work correctly with this port until it is done.
+The radio runs its own firmware, separate from the M4 application built here,
+and the application cannot start without it. Boards normally arrive with it
+already programmed, so **check first and write only if you have to**: writing it
+erases the NWP region, and an interrupted write has left a board needing
+recovery.
+
+`tos.py flash` reads the device's version and writes TA only when the device
+reports having none. To look yourself:
 
 ```bash
-cd ~/TuyaOpen
-platform/SiWx917/tools/commander/commander flash \
-  platform/SiWx917/mcu/patch/RS9117_WC_SI.rps \
-  --device SiWG917M111MGTBA
+cd platform/SiWx917
+tools/commander/commander mfg917 info -d SiWG917M111MGTBA --json
 ```
 
-Adjust `--device` if your target part number differs.
+`nwp_firmware_version` in that output means an image is *stored*. It does not
+mean the image is intact, nor that it is the one the boot process will load --
+both have been seen false on a device reporting a version that looked perfectly
+normal. It also does not mean the image has finished installing: one board read
+its new version back and still would not run until it was power-cycled. When
+the application starts but the radio does not, go to
+[Recovering a device whose radio will not start](#recovering-a-device-whose-radio-will-not-start).
+
+To write it deliberately, pick **TA ONLY** from the `tos.py flash` menu, or skip
+the menu:
+
+```bash
+SIWX917_FLASH=ta tos.py flash              # over SWD, if a probe is attached
+SIWX917_FLASH=ta tos.py flash -p /dev/ttyUSB0   # over serial/ISP
+```
+
+Both channels can write it. Over SWD, `commander rps load` uploads a
+flash-loader algorithm into RAM and lets it drive the NWP bootloader -- the
+mechanism AN1497 (SiWx917 SoC SWD Algorithm Programmer) documents; Commander
+prints *Uploading flashloader...* when it does this. No ISP keypress is
+involved on that path.
+
+> An earlier revision of this guide said SWD had no working path for TA
+> firmware, citing `commander rps load` writing nothing and `commander flash`
+> hanging at *Waiting for bootloader to perform upgrade*. Verified 2026-08-20:
+> `commander rps load <ta>.rps -d SiWG917M111MGTBA --tif SWD` completes on both
+> boards tried, and the radio starts.
+>
+> What the old observations were really showing is that **a completed write is
+> not a started radio**. On one board the write reported DONE, `mfg917 info`
+> read the new version back, and the application never printed a line -- until
+> the board was power-cycled, after which it came up normally. The install
+> appears to be finalised at reset, and the reset Commander issues over a plain
+> J-Link does not always do it. Power-cycle before concluding the write failed.
 
 ### 1. Flash M4 application firmware
 
@@ -256,13 +292,151 @@ Then call `tkl_system_print_task_stats()` from your application.
 
 - Chip vendor SDKs (Simplicity / Wiseconnect) are downloaded by `platform_prepare.py` and pinned in `platform_libsdepend`
 - `build_setup.py` expects the app build directory as the 5th CLI argument (passed by current `tos.py` / `cli_build.py`)
-- AES-GCM uses platform AES via `ENABLE_PLATFORM_AES` + `tal_aes_gcm_*`, with the scratch buffer allocated per call so concurrent TLS sessions cannot corrupt each other; any hardware failure falls back to software mbedtls
+- AES-GCM uses platform AES via `ENABLE_PLATFORM_AES` + `tal_aes_gcm_*`, with the scratch buffer allocated per call so concurrent callers cannot corrupt each other. Note there is **no runtime fallback**: `ENABLE_PLATFORM_AES` is a compile-time either/or (`src/tal_security/src/mbedtls/mbedtls_symmetry.c` guards its software `tkl_aes_gcm_*` with `#if !defined(ENABLE_PLATFORM_AES)`), and `tal_aes_gcm_encode/decode` forward straight to the platform. A hardware failure returns an error to the caller. The only callers are the AI image/video paths in `src/tuya_ai_service/` -- not TLS
 - No-codec playback volume is applied as digital gain in the board's `tdd_audio_no_codec`
 - MP3 playback needs `MP3_DECODER_STATIC_BUF` (selected by the SiWx917 boards). Without it the minimp3 scratch comes from PSRAM via `MP3_MALLOC`, and the per-frame access latency stutters audibly. It trades ~24KB of internal RAM for that and makes decoding single-stream only
 - Large static buffers can use `TUYA_MEM_SECTION_RAM` / `TUYA_MEM_SECTION_PSRAM` (`tuya_mem_section.h`). The section names carry **no** leading dot and the linker scripts must match exactly, or the input section is silently orphaned
 - **Anti-stutter (latest TuyaOpen):** keep large `AI_*_RINGBUF_SIZE` in board config; enable both `ENABLE_EXT_RAM` (AI path) and `CONFIG_SPIRAM` (adapter). Latest defaults (20KB) are too small for voice.
 
+## Recovering a device whose radio will not start
+
+The application boots and prints one of these, then gets no further:
+
+```
+[tuyaos][E][app_tuya.c] WiFi initialization error 16056    SL_STATUS_VALID_FIRMWARE_NOT_PRESENT
+[tuyaos][E][app_tuya.c] WiFi initialization error 16059    SL_STATUS_CARD_READY_TIMEOUT
+[tuyaos][I][app_tuya.c] Failed to bring m4_ta_secure_handshake: 0x7   (timeout)
+```
+
+**Do not start by rewriting the firmware.** On a real recovery the stored image
+was intact and rewriting it three different ways -- 1.6 MB each time -- fixed
+nothing, because what had broken was the bootloader's record of *which* image to
+load. Ask the ROM bootloader instead; it can answer both questions and repair
+the second in a few bytes.
+
+Wire the ISP UART and put the chip in ISP mode:
+
+| Adapter | → | Chip | GPIO | Package pin |
+|---|---|---|---|---|
+| TX | → | RX | GPIO_8 | A20 |
+| RX | ← | TX | GPIO_9 | A21 |
+| GND | — | GND | — | — |
+
+ISP mode: hold GPIO_34 (`JTAG_TDO_SWO`) low, tap Reset, release. The chip
+samples that pin as reset is released; the datasheet (5.8.6) says it must be
+left *unconnected* during reset for the bootloader to skip ISP and run the
+flash.
+
+Holding it low does **not** take SWD away. The datasheet calls SWD a two-pin
+port (5.9) and `JTAG_TDO_SWO` is the pin JTAG shares with SWV, so it is not one
+of the two -- SWD runs on `JTAG_TCK_SWCLK`/GPIO_31 and `JTAG_TMS_SWDIO`/GPIO_33
+(6.3). 5.8.6 gives ISP's purpose as reprogramming the flash "if the application
+code uses JTAG pins for functional use", i.e. ISP is the way in when JTAG is
+unavailable, not a switch that disables debugging.
+
+The log UART is a *different* pair, so `tos.py monitor` and this cannot share
+wires. The datasheet names the ISP pair explicitly: `GPIO_8 / ISP_UART_RX` and
+`GPIO_9 / ISP_UART_TX` (6.3).
+
+### Where the application log comes out
+
+`tkl_uart.c` maps `TUYA_UART_NUM_0` -- the port `app_tuya.c` opens and
+`syscalls.c`'s `_write()` prints through -- to the **ULP UART**, so every
+`printf` leaves on whichever pins `RTE_ULP_UART_*_PORT_ID` selects. With the
+board's current `ENABLE_ULP_UART=y`, `TX_PORT_ID=1`, `RX_PORT_ID=2`:
+
+| Adapter | → | Chip signal | TuyaOpen GPIO | Flat pin |
+|---|---|---|---|---|
+| RX | ← | ULP_GPIO_11 (log TX) | `GPIO_NUM_41` | 75 |
+| TX | → | ULP_GPIO_9 (log RX) | `GPIO_NUM_39` | 73 |
+| GND | — | GND | | |
+
+115200 8N1; connecting RX and GND is enough to read the log. The flat numbers
+come from `RTE_ULP_UART_TX_PIN = 11 + GPIO_MAX_PIN` with `GPIO_MAX_PIN` 64.
+
+On a kit with an on-board Silicon Labs debugger (DK2605A/BRD2605A) this already
+lands on the J-Link VCOM, so `tos.py monitor` finds it with no wiring. A board
+driven by an external probe has no VCOM -- wire a USB-serial adapter to the pins
+above, or there will be no log however well the flash went.
+
+### Talking to the ROM bootloader
+
+Any serial terminal will do (Tera Term, minicom, `screen`, a dozen lines of
+pyserial). Send `Ctrl+\` (0x1C) to wake it, then `U` to print its menu.
+
+These are the entries that matter here. `B` / `4` / `1` are given by AN1431 and
+the Matter documentation, and the SDK spells the first one
+`#define BURN_NWP_FW 'B'` (`sl_si91x_constants.h`). The rest of this list is
+transcribed from a menu a device actually printed -- treat it as observed
+rather than documented:
+
+| Key | Entry | Writes flash? |
+|---|---|---|
+| `K` | Check Wireless Firmware Integrity (Image No : 0-f) | no |
+| `5` | Select Default Wireless Firmware (Image No : 0-f) | a few bytes |
+| `1` | Load Default Wireless Firmware | no |
+| `B` | Burn Wireless Firmware (Image No : 0-f) | yes, ~1.6 MB |
+| `A` | Load Wireless Firmware (Image No : 0-f) | no |
+| `F` | Select M4 and Wireless Images Pair | a few bytes |
+| `4` → `1` | Burn M4 Firmware, image 1 | yes |
+| `b` | Change UART Baud Rate | no |
+
+Work in this order, because the cost differs by orders of magnitude:
+
+1. **`K` on each slot 0-f.** This is the only way to tell an image that is
+   *stored* from one that is *stored and intact* -- `mfg917 info` reads
+   metadata and cannot make that distinction.
+2. **Power-cycle before anything else.** A staged image is finalised at reset,
+   and a debug probe's reset may not be enough. This has recovered a board that
+   looked dead.
+3. **`5` + slot** if a slot passes integrity but the device still reports
+   16056. That repoints the default in a few bytes instead of retransmitting
+   1.6 MB.
+4. **`B` + slot** only when no slot holds a good image.
+
+### Transferring an image over Kermit
+
+The bootloader's Kermit receiver is a minimal implementation, and C-Kermit's
+defaults do not work with it. These settings come from reading the device's
+own Send-Init response and the packet log of a transfer that failed:
+
+```
+set send packet-length 94       ; device advertises MAXL=94, CAPAS=2, CHKT=1
+set receive packet-length 94    ; C-Kermit's default extended-length packets
+set window 1                    ; are NAKed, as is any sliding window
+set block-check 1
+set retry 20
+set prefixing all               ; default is CAUTIOUS, which sends 0x0c/0x80
+                                ; bare; the ROM receiver NAKs bare controls
+set transfer cancellation off   ; a stray keystroke is read as X/Z (cancel);
+                                ; run the client with stdin on /dev/null too
+set file type binary
+set flow-control none
+set handshake none
+set carrier-watch off
+```
+
+Then `send <file>.rps`. AN1431 quotes ~85 s for the NWP image at 921600 baud;
+at 115200 the same transfer runs well over ten minutes, so raise the rate
+(menu key `b`, or `set speed`) before starting.
+
+Use `mcu/patch/RS9117_WC_SI.rps`, the image with measured evidence of booting
+on this hardware. The SDK also ships
+`sdks/wiseconnect/connectivity_firmware/standard/SiWG917-B.*.rps`; writing that
+over a working device has not been shown to be an improvement, and once left a
+board that would not start.
+
+Release GPIO_34, power-cycle, and check the log again. A recovered device
+prints:
+
+```
+WiFi initialization success
+m4_ta_secure_handshake success
+Running TA fw: 1611.2.1.1.255.11.63
+```
+
 ## Additional Resources
 
 - [TuyaOpen](https://github.com/tuya/TuyaOpen)
 - [TuyaOpen-SiliconLabs](https://github.com/tuya/TuyaOpen-SiliconLabs)
+- [AN1431: SiWx917 SoC Firmware Update](https://docs.silabs.com/wifi-application-notes/latest/wifi-siwx917-soc-firmware-update-application-note/update-mechanisms)

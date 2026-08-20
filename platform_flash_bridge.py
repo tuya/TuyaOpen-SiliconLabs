@@ -5,32 +5,45 @@ SiWx917 flashing hook for `tos.py flash`.
 
 tools/cli_command/cli_flash.py looks for platform_flash_bridge.py in the
 selected platform's root and, when present, calls platform_flash() instead of
-tyutool. SiWx917 needs its own path because Simplicity Commander drives two
-physically different channels, and using the wrong one corrupts the firmware:
+tyutool.
 
-    channel        file    command                    needs
-    -------------  ------  -------------------------  -------------------------
-    SWD / J-Link   .s37    commander flash            a debug probe
-    serial / ISP   .rps    commander serial load      manual ISP+Reset keypress
+Simplicity Commander can reach this part over two physically different
+channels, and both can write either firmware:
 
-`tos.py flash` with no arguments has to work here the same way it does on every
-other platform, so the channel is detected rather than demanded:
+    channel        command                 needs
+    -------------  ----------------------  ------------------------------------
+    SWD / J-Link   commander rps load      a debug probe on SWCLK/SWDIO
+    serial / ISP   commander serial load   ISP mode (GPIO_34 low, then Reset)
 
-    1. an explicit -p <port> always means serial;
-    2. otherwise, probe SWD -- if a debug probe can reach the chip, use it,
-       because that path needs no keypress at all;
-    3. otherwise fall back to the single attached USB serial adapter.
+Both take a .rps and route it by the image type in its RPS header, so the same
+command writes either the M4 application or the NWP/TA wireless firmware.
+Writing both means writing two images in sequence; a single merged image was
+tried and does not load (see the comment next to _find_ta_image).
 
-The SWD probe costs about 1.5s when no probe is attached, which is cheap enough
-to pay for not having to ask the user which cable they plugged in. It also
-fails in exactly the cases where serial is the right answer -- no probe, board
-held in ISP mode (SWO/GPIO_34 tied low disables the debug interface) -- so the
-fallback lands correctly instead of guessing from USB IDs.
+`rps load` uploads a flash-loader algorithm into RAM and lets it drive the NWP
+bootloader -- the mechanism AN1497 (SiWx917 SoC SWD Algorithm Programmer)
+documents. Commander prints "Uploading flashloader..." when it does this. No ISP
+keypress is involved on this path.
 
-A .rps is never handed to `flash` and a .s37 is never handed to `serial load`;
-see _guard_channel(). The NWP/TA (wireless coprocessor) firmware is only
-reflashed when provisioning a fresh board or recovering a corrupted one, so it
-is opt-in via SIWX917_FLASH_TA=1 rather than something this can do by accident.
+    Earlier revisions of this file claimed SWD had no working path for NWP/TA
+    firmware. Measured 2026-08-20 on a DK2605A: `rps load <ta>.rps --tif SWD`
+    completes and the board boots. Two boards have now been written this way.
+
+    A completed write is still not a started radio. On one board the write
+    reported DONE, `mfg917 info` read the new version back, and the application
+    never printed a line -- until the board was power-cycled, after which it
+    came up normally. The install looks to be finalised at reset, and the reset
+    Commander issues over a plain J-Link does not always do it. Power-cycle
+    after writing NWP firmware before concluding anything.
+
+Channel and target are both chosen from a menu rather than guessed, so what got
+detected is visible before anything is written. -p <port> and the SIWX917_*
+environment variables below skip the prompts for CI and production programming.
+
+Writing NWP/TA firmware erases the radio's flash first; an interrupted write has
+left a board needing recovery. It therefore happens only when explicitly asked
+for, never as a repair for firmware that is merely different. When a device
+flashes cleanly and the radio still will not start, see BOOT_FAILURE_HINTS.
 
 This module is loaded by importlib.util.spec_from_file_location() under a
 synthetic module name, so its package context is not set up and it cannot
@@ -39,9 +52,11 @@ call instead of reusing get_system_name().
 """
 
 import glob
+import json
 import os
 import platform
 import subprocess
+import sys
 
 # -----------------------------------------------------------------------------
 #                                  Constants
@@ -69,9 +84,54 @@ SERIAL_GLOBS = {
     "Windows": (),
 }
 
+# The NWP/TA firmware to write. This is the image with measured evidence of
+# booting on this hardware: a board came up with "Running TA fw:
+# 1611.2.1.1.255.11.63" twice, on 2026-08-19 and again on 2026-08-20.
+#
+# An earlier revision pointed this at the SDK's SiWG917-B.*.rps because AN1435
+# says a SiWx917 reports version prefix 1711 and this image reports 1611. That
+# reasoning was wrong: "images named SiWG917-B.* report 1711" does not imply
+# "an image reporting 1611 cannot run here". RS9117 is this silicon's
+# pre-acquisition name and 1611 is an older firmware line for it. Writing 1711
+# over a working 1611 stopped a board from booting.
 TA_FIRMWARE_RELPATH = os.path.join("mcu", "patch", "RS9117_WC_SI.rps")
 
+# SEGGER's USB vendor ID. A J-Link's own VCOM shows up as a serial port but is
+# the board's console UART, not the ISP UART, on both boards this platform
+# supports -- so it is kept out of the channel menu (an explicit -p still
+# honours it, with a warning).
+JLINK_USB_VID = 0x1366
+
 SWD_PROBE_TIMEOUT = 20
+MFG_INFO_TIMEOUT = 30
+ADAPTER_LIST_TIMEOUT = 25
+
+# RPS header layout. Offsets and the version field order were cross-checked
+# against labels Silicon Labs wrote themselves: the SDK's own file names
+# (connectivity_firmware/standard/SiWG917-B.2.15.5.0.0.2.rps decodes to
+# 2.15.5.0.0.2, the lite image likewise) and what a running board reports.
+#
+# The word0 flag bits were derived by diffing images before and after
+# `commander rps convert --combinedimage` (2026-08-20): the only bit that
+# changed on either image was bit 7. Bit 0 separates the two M4 images built
+# here (0x41) from the four NWP images the SDK ships (0x00).
+RPS_HEADER_LEN = 64
+RPS_MAGIC_OFFSET = 4          # uint16 LE, 0x900D
+RPS_MAGIC = 0x900D
+RPS_IMAGE_SIZE_OFFSET = 8     # uint32 LE, file length minus the header
+RPS_VER_A_OFFSET = 0x0C       # build, security, minor, major
+RPS_VER_B_OFFSET = 0x2C       # patch, customer, rom_id, chip_id
+RPS_FLAG_M4 = 0x01            # set on M4 application images
+RPS_FLAG_COMBINED = 0x80      # set on images eligible for / produced by combining
+
+# Skip the prompts. SIWX917_FLASH answers the target menu, SIWX917_CHANNEL the
+# channel menu.
+FLASH_ACTION_ENV = "SIWX917_FLASH"
+FLASH_ACTIONS = ("app", "ta", "both")
+CHANNEL_ENV = "SIWX917_CHANNEL"
+CHANNELS = ("swd", "serial")
+
+MENU_RULE = "--------------------"
 
 ISP_PROMPT = """
 --------------------------------------------------------------------
@@ -92,14 +152,54 @@ ISP_PROMPT = """
 
 SWD_HINTS = """  SWD troubleshooting:
     - is the board powered?
-    - SWCLK on GPIO_31, SWDIO on GPIO_33?
-    - SWO / GPIO_34 tied low holds the chip in ISP mode, which
-      disables the debug interface -- release it for SWD."""
+    - SWCLK on GPIO_31, SWDIO on GPIO_33 (datasheet 6.3: JTAG_TCK_SWCLK is
+      GPIO_31, JTAG_TMS_SWDIO is GPIO_33, JTAG_TDO_SWO is GPIO_34)
+    - GPIO_34 low at reset selects ISP mode, and that does not take SWD away:
+      datasheet 5.9 calls SWD a two-pin port and says TDO/SWO is the pin
+      JTAG shares with SWV, so it is not one of the two. Datasheet 5.8.6 gives
+      ISP's purpose as reprogramming "if the application code uses JTAG pins
+      for functional use", i.e. ISP is the way in when JTAG is unavailable."""
+
+# Printed after a TA write. A completed transfer is not a working radio, and
+# saying so is the whole point -- "Platform flash success" would imply more.
+TA_AFTER_WRITE = """  The transfer finished, which is not the same as a radio that starts.
+  Reset the board and check the application log for:
+      WiFi initialization success
+      Running TA fw: <version>
+  If it still reports 16056 or 16059, see the boot-failure hints below."""
+
+BOOT_FAILURE_HINTS = """  Application starts but the radio does not:
+      WiFi initialization error 16056   no valid NWP firmware selected/present
+      WiFi initialization error 16059   NWP never answered at all
+      Failed to bring m4_ta_secure_handshake: 0x7   (timeout, follows either)
+
+    `mfg917 info` reporting an nwp_firmware_version proves only that metadata
+    exists -- not that the image is intact or that it is the one the bootloader
+    loads. Before rewriting anything:
+
+      power-cycle first   a staged image is finalised at reset, and a debug
+                          probe's reset may not be enough. Costs nothing and
+                          has recovered a board that looked dead.
+      default-image       a slot can pass integrity and still not be the one
+      selector            the bootloader loads. Only the ROM bootloader menu
+                          can read or change that.
+
+    Ask the ROM bootloader, which can tell these apart. Put the chip in ISP
+    mode (GPIO_34 low, then Reset), open the ISP UART (GPIO_8/GPIO_9) in any
+    serial terminal, send 0x1C then 'U' for the menu, and:
+
+      'K' + slot   check that slot's integrity   (read-only)
+      '5' + slot   point the default at it       (a few bytes)
+      'B' + slot   burn new firmware into it     (~1.6 MB, last resort)
+
+    In that order -- the cost differs by orders of magnitude. GETTING_STARTED.md
+    has the full menu and the C-Kermit settings the ROM receiver needs."""
 
 SERIAL_HINTS = """  Serial/ISP troubleshooting:
-    - chip must be in ISP mode: SWO / GPIO_34 low, then Reset
+    - chip must be in ISP mode: GPIO_34 low, then Reset
     - CH340 TX -> GPIO_8 (chip RX), CH340 RX -> GPIO_9 (chip TX)
-    - GND must be common between adapter and board"""
+    - GND must be common between adapter and board
+    - a J-Link's VCOM is the console UART, not the ISP UART"""
 
 
 # -----------------------------------------------------------------------------
@@ -135,71 +235,18 @@ def _device(using_data) -> str:
     return using_data.get("CONFIG_CHIP_CHOICE", "") or DEFAULT_DEVICE
 
 
-def _artifact_paths(using_data, binfile: str):
+def _artifact_paths(using_data, binfile: str) -> str:
     """
-    Derive the app images from the QIO bin path cli_flash.py hands us.
+    Derive the M4 application image from the QIO bin path cli_flash.py hands us.
 
-      binfile   <app>/.build/bin/<project>_QIO_<ver>.bin
-      s37       <app>/.build/bin/<project>_<ver>.s37
-      rps       <app>/.build/<project>/<project>.rps
+      binfile  <app>/.build/bin/<project>_QIO_<ver>.bin
+      rps      <app>/.build/<project>/<project>.rps
     """
     bin_dir = os.path.dirname(binfile)
     build_dir = os.path.dirname(bin_dir)
     project = using_data.get("CONFIG_PROJECT_NAME", "")
-    version = using_data.get("CONFIG_PROJECT_VERSION", "")
 
-    s37 = os.path.join(bin_dir, f"{project}_{version}.s37")
-    rps = os.path.join(build_dir, project, f"{project}.rps")
-    return s37, rps
-
-
-def _usb_serial_ports() -> list:
-    """
-    USB serial adapters only.
-
-    pyserial lists every legacy /dev/ttyS* alongside the real adapters, and
-    only USB devices carry a vendor ID, so that is the discriminator.
-    """
-    try:
-        from serial.tools import list_ports
-        return sorted(p.device for p in list_ports.comports()
-                      if p.vid is not None)
-    except ImportError:
-        found = []
-        for pattern in SERIAL_GLOBS.get(platform.system(), ()):
-            found.extend(glob.glob(pattern))
-        return sorted(found)
-
-
-def _swd_reachable(commander: str, device: str, logger) -> bool:
-    """Can a debug probe reach the chip right now? Quiet, read-only."""
-    logger.debug("Probing for a debug probe (commander device info)...")
-    try:
-        done = subprocess.run([commander, "device", "info", "-d", device],
-                              stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL,
-                              timeout=SWD_PROBE_TIMEOUT)
-        return done.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-def _guard_channel(image: str, serial: bool, logger) -> bool:
-    """
-    Refuse the file/channel combinations that damage the device.
-
-    Commander will happily accept a .rps over SWD and leave the NWP firmware
-    in a broken state, so the check has to happen here rather than relying on
-    the tool to reject it.
-    """
-    ext = os.path.splitext(image)[1].lower()
-    if serial and ext != ".rps":
-        logger.error(f"Serial (ISP) flashing needs a .rps image, got: {image}")
-        return False
-    if not serial and ext != ".s37":
-        logger.error(f"SWD flashing needs a .s37 image, got: {image}")
-        return False
-    return True
+    return os.path.join(build_dir, project, f"{project}.rps")
 
 
 def _run(argv, logger) -> bool:
@@ -212,6 +259,18 @@ def _run(argv, logger) -> bool:
         return False
 
 
+def _run_quiet(argv, timeout, logger):
+    """Run commander and capture its output. Returns (ok, stdout)."""
+    logger.debug("exec: " + " ".join(argv))
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.debug(f"{argv[1] if len(argv) > 1 else argv[0]} failed: {e}")
+        return False, ""
+    return done.returncode == 0, done.stdout
+
+
 def _check_image(image: str, logger) -> bool:
     if os.path.isfile(image):
         return True
@@ -220,34 +279,437 @@ def _check_image(image: str, logger) -> bool:
     return False
 
 
-def _flash_serial(commander, image, port, device, fixedspeed, logger) -> bool:
-    if not _guard_channel(image, serial=True, logger=logger):
-        return False
-    if not _check_image(image, logger):
-        return False
+# -----------------------------------------------------------------------------
+#                              RPS header decoding
+# -----------------------------------------------------------------------------
 
-    logger.info(ISP_PROMPT)
-    argv = [commander, "serial", "load", image,
-            "--serialport", port, "--showprogress", "-d", device]
-    if fixedspeed:
-        argv.append("--fixedspeed")
+def _rps_header(image: str, logger):
+    """
+    Decode the RPS header. Returns a dict, or None when it is not an RPS.
 
-    if _run(argv, logger):
-        return True
-    logger.error(SERIAL_HINTS)
+    Keys: flags, is_m4, combine_flag, is_combined, chip_id, rom_id, version.
+    """
+    try:
+        size = os.path.getsize(image)
+        with open(image, "rb") as f:
+            head = f.read(RPS_HEADER_LEN)
+    except OSError as e:
+        logger.debug(f"Cannot read {image}: {e}")
+        return None
+
+    if len(head) < RPS_HEADER_LEN:
+        logger.debug(f"{image} is shorter than an RPS header")
+        return None
+
+    magic = int.from_bytes(
+        head[RPS_MAGIC_OFFSET:RPS_MAGIC_OFFSET + 2], "little")
+    if magic != RPS_MAGIC:
+        logger.debug(f"{image} is not an RPS (magic 0x{magic:04x}, "
+                     f"expected 0x{RPS_MAGIC:04x})")
+        return None
+
+    flags = int.from_bytes(head[0:4], "little")
+    image_size = int.from_bytes(
+        head[RPS_IMAGE_SIZE_OFFSET:RPS_IMAGE_SIZE_OFFSET + 4], "little")
+
+    # RPS_FLAG_COMBINED means "this image may take part in combining", not
+    # "this file holds two images" -- `rps convert --combinedimage` sets it on
+    # single images too, which is how the parts are prepared before merging.
+    # Whether a file actually carries both is a question of size: image_size
+    # describes only the first image, and a merged file has the second one
+    # appended whole, header and all.
+    #
+    # Measured on a 2478720-byte merged file: image_size 810656 (the M4 part),
+    # first image ends at 810720, and the remaining 1668000 bytes are exactly
+    # the NWP file that went in, whose own header claims 1667936. Checking that
+    # second claim is what catches a truncated merge.
+    first_end = image_size + RPS_HEADER_LEN
+    carries_two = False
+    if size < first_end:
+        logger.debug(f"{image} is truncated (header claims {image_size} bytes "
+                     f"of payload, file is {size})")
+        return None
+    if size > first_end:
+        if size < first_end + RPS_HEADER_LEN:
+            logger.debug(f"{image} has {size - first_end} trailing bytes, too "
+                         "few for a second RPS header")
+            return None
+        try:
+            with open(image, "rb") as f:
+                f.seek(first_end)
+                second = f.read(RPS_HEADER_LEN)
+        except OSError as e:
+            logger.debug(f"Cannot read the second image in {image}: {e}")
+            return None
+        second_magic = int.from_bytes(
+            second[RPS_MAGIC_OFFSET:RPS_MAGIC_OFFSET + 2], "little")
+        second_size = int.from_bytes(
+            second[RPS_IMAGE_SIZE_OFFSET:RPS_IMAGE_SIZE_OFFSET + 4], "little")
+        if second_magic != RPS_MAGIC:
+            logger.debug(f"{image} has data at offset {first_end} that is not "
+                         f"an RPS (magic 0x{second_magic:04x})")
+            return None
+        if second_size != size - first_end - RPS_HEADER_LEN:
+            logger.debug(f"{image} second image is truncated (claims "
+                         f"{second_size}, has "
+                         f"{size - first_end - RPS_HEADER_LEN})")
+            return None
+        carries_two = True
+    build, security, minor, major = head[RPS_VER_A_OFFSET:RPS_VER_A_OFFSET + 4]
+    patch, customer, rom_id, chip_id = \
+        head[RPS_VER_B_OFFSET:RPS_VER_B_OFFSET + 4]
+
+    return {
+        "flags": flags,
+        "is_m4": bool(flags & RPS_FLAG_M4),
+        # combine_flag: allowed to be merged. is_combined: actually holds both.
+        "combine_flag": bool(flags & RPS_FLAG_COMBINED),
+        "is_combined": carries_two,
+        "chip_id": chip_id,
+        "rom_id": rom_id,
+        # Same field order and formatting the running firmware prints at boot,
+        # so the two can be compared by eye as well as by string.
+        "version": (f"{chip_id:x}{rom_id:x}.{major}.{minor}.{security}"
+                    f".{patch}.{customer}.{build}"),
+    }
+
+
+def _find_ta_image(logger) -> str:
+    """The NWP/TA image shipped here, or "" when it is missing."""
+    image = os.path.join(_platform_root(), TA_FIRMWARE_RELPATH)
+    if not os.path.isfile(image):
+        logger.error(f"No NWP/TA firmware at {TA_FIRMWARE_RELPATH}")
+        return ""
+    return image
+
+
+# Why "TA + M4" writes two images instead of one combined image
+# -------------------------------------------------------------
+# Commander can merge them, and the merge itself works:
+#
+#   rps convert m4_c.rps  --app <m4>.rps   --combinedimage
+#   rps convert nwp_c.rps --nwpapp <ta>.rps --combinedimage
+#   rps convert combined.rps --app m4_c.rps --nwpapp nwp_c.rps
+#
+# Three steps because `rps convert` refuses inputs that do not already carry
+# the COMBINED_IMAGE flag ("Image does not have the COMBINED_IMAGE flag set;
+# cannot combine this image!"), and neither the image built here nor the one
+# the SDK ships has it.
+#
+# But writing the result did not work. Measured 2026-08-20 on a DK2605A, with
+# a 2478720-byte merged image that `rps convert` produced without complaint:
+#
+#   $ commander rps load combined.rps -d SiWG917M111MGTBA --tif SWD
+#   Uploading flashloader...
+#   Waiting for flashloader to become ready
+#   Writing data...
+#   ERROR: Waiting for flashloader failed: 0 - Flashloader is not ready
+#
+# The board was undamaged (radio still booted, version unchanged), so nothing
+# was committed. Cause unknown -- possibly the size, possibly that the merged
+# image presents an M4 header with the NWP image appended and the flash-loader
+# takes the M4 path. The same command with the NWP image alone (1668000 bytes)
+# succeeds and the radio comes up, so the channel is fine.
+#
+# Writing the two images one after another uses only operations that have each
+# been verified on hardware, so that is what this does. If you want to revisit
+# the merged path, the recipe above is the starting point.
+
+
+# -----------------------------------------------------------------------------
+#                          Channel detection and menus
+# -----------------------------------------------------------------------------
+
+# `commander adapter list` keys worth keeping, mapped to our own names.
+_ADAPTER_FIELDS = {
+    "adapterName": "name",
+    "adapterDescription": "desc",
+    "adapterNickname": "name",
+    "AdapterType": "type",
+}
+
+
+def _jlink_adapters(commander, logger) -> list:
+    """
+    Debug probes Commander can see, as [{"serial", "label"}].
+
+    Parsed from `commander adapter list`, which prints one key=value per line
+    per adapter. adapterName/adapterDescription are what make the entry
+    recognisable in a menu when more than one probe is attached.
+    """
+    ok, out = _run_quiet([commander, "adapter", "list"],
+                         ADAPTER_LIST_TIMEOUT, logger)
+    if not ok:
+        return []
+
+    adapters, cur = [], {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        # Silicon Labs adapters print key=value. A third-party J-Link prints
+        # far less, and its firmware banner uses " is " instead of "=":
+        #   FirmwareString is J-Link ARM V8 compiled Nov 28 2014 13:44:46
+        if line.startswith("FirmwareString is "):
+            if cur:
+                cur["firmware"] = line[len("FirmwareString is "):].strip()
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key == "serialNumber" and value:
+            if cur.get("serial"):
+                adapters.append(cur)
+            cur = {"serial": value, "name": "", "desc": "", "type": "",
+                   "firmware": ""}
+        elif key in _ADAPTER_FIELDS and cur and value:
+            cur[_ADAPTER_FIELDS[key]] = value
+    if cur.get("serial"):
+        adapters.append(cur)
+
+    out_list = []
+    for a in adapters:
+        if a.get("type") and a["type"].lower() != "jlink":
+            continue
+        # A clone reports serialNumber=4294967295 (0xFFFFFFFF) and no name, so
+        # printing the number alone tells the user nothing. Prefer whatever
+        # identity is actually there, and fall back to the firmware banner.
+        serial = "" if a["serial"] == "4294967295" else a["serial"]
+        parts = [p for p in (serial, a["name"], a["desc"]) if p]
+        if not parts and a["firmware"]:
+            parts = [a["firmware"]]
+        out_list.append({"serial": serial,
+                         "label": " ".join(parts) or "unidentified probe"})
+    return out_list
+
+
+def _usb_serial_ports(skip_jlink_vcom: bool = True) -> list:
+    """
+    USB serial adapters, as [{"device", "label"}].
+
+    pyserial lists every legacy /dev/ttyS* alongside the real adapters, and
+    only USB devices carry a vendor ID, so that is the discriminator.
+
+    A J-Link's own VCOM is dropped by default: on both boards this platform
+    supports it is the console UART, not the ISP UART, so offering it as a
+    flashing channel only invites a transfer that cannot work.
+    """
+    try:
+        from serial.tools import list_ports
+        found = []
+        for p in sorted(list_ports.comports(), key=lambda x: x.device):
+            if p.vid is None:
+                continue
+            if skip_jlink_vcom and p.vid == JLINK_USB_VID:
+                continue
+            label = " ".join(x for x in (p.product, p.manufacturer) if x)
+            found.append({"device": p.device,
+                          "label": label or f"{p.vid:04x}:{p.pid:04x}"})
+        return found
+    except ImportError:
+        found = []
+        for pattern in SERIAL_GLOBS.get(platform.system(), ()):
+            for dev in sorted(glob.glob(pattern)):
+                found.append({"device": dev, "label": ""})
+        return found
+
+
+def _ask(prompt: str, count: int, logger) -> int:
+    """Read a 1-based menu choice. Returns 0 when the user gives up."""
+    while True:
+        try:
+            raw = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            print("")
+            return 0
+        try:
+            num = int(raw.strip())
+        except ValueError:
+            continue
+        if 1 <= num <= count:
+            return num
+
+
+def _choose_channel(commander, port, logger):
+    """
+    Pick the flash channel. Returns (serial: bool, port: str) or (None, "").
+
+    The menu is shown even when only one channel was detected: seeing what is
+    attached before anything is written is worth one keypress, and it keeps
+    this from special-casing the single-candidate path.
+    """
+    if port:
+        logger.info(f"Port given ({port}) -- using serial/ISP on it.")
+        if _is_jlink_vcom(port):
+            logger.warning(f"{port} looks like a J-Link VCOM, which is the "
+                           "console UART on this board, not the ISP UART. "
+                           "Flashing over it will not work.")
+        return True, port
+
+    forced = os.environ.get(CHANNEL_ENV, "").strip().lower()
+    if forced:
+        if forced not in CHANNELS:
+            logger.error(f"{CHANNEL_ENV}={forced} is not one of "
+                         f"{'/'.join(CHANNELS)}")
+            return None, ""
+        logger.info(f"{CHANNEL_ENV}={forced} -- honouring it as given.")
+        if forced == "swd":
+            return False, ""
+        ports = _usb_serial_ports()
+        if len(ports) != 1:
+            logger.error("SIWX917_CHANNEL=serial needs exactly one USB serial "
+                         f"adapter, found {len(ports)}. Pass -p <port>.")
+            return None, ""
+        return True, ports[0]["device"]
+
+    entries = []
+    for a in _jlink_adapters(commander, logger):
+        entries.append(("swd", "", f"SWD / J-Link   {a['label']}"))
+    for p in _usb_serial_ports():
+        entries.append(("serial", p["device"],
+                        f"serial / ISP   {p['device']}  {p['label']}".rstrip()))
+
+    if not entries:
+        logger.error("No flash channel detected: no debug probe and no USB "
+                     "serial adapter.")
+        logger.error(SWD_HINTS)
+        logger.error(SERIAL_HINTS)
+        return None, ""
+
+    print(MENU_RULE)
+    for i, (_, _, label) in enumerate(entries):
+        print(f"{i + 1}. {label}")
+    print(MENU_RULE)
+    num = _ask("Select flash channel: ", len(entries), logger)
+    if not num:
+        return None, ""
+
+    kind, dev, _ = entries[num - 1]
+    return kind == "serial", dev
+
+
+def _is_jlink_vcom(port: str) -> bool:
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return False
+    for p in list_ports.comports():
+        if p.device == port:
+            return p.vid == JLINK_USB_VID
     return False
 
 
-def _flash_swd(commander, image, device, logger) -> bool:
-    if not _guard_channel(image, serial=False, logger=logger):
-        return False
+def _choose_action(logger) -> str:
+    """
+    Pick what to write. Returns one of FLASH_ACTIONS, or "" to abort.
+
+    Writing NWP/TA firmware erases the radio first, so this is never inferred
+    from device state: it is asked, or given outright via SIWX917_FLASH.
+    """
+    forced = os.environ.get(FLASH_ACTION_ENV, "").strip().lower()
+    # SIWX917_FLASH_TA=1 predates this and meant "write the TA firmware instead
+    # of the application". Keep it working as a name for that.
+    if not forced and os.environ.get("SIWX917_FLASH_TA") == "1":
+        forced = "ta"
+    if forced:
+        if forced not in FLASH_ACTIONS:
+            logger.error(f"{FLASH_ACTION_ENV}={forced} is not one of "
+                         f"{'/'.join(FLASH_ACTIONS)}")
+            return ""
+        logger.info(f"{FLASH_ACTION_ENV}={forced} -- honouring it as given.")
+        return forced
+
+    options = (
+        ("app", "M4 ONLY    application"),
+        ("ta", "TA ONLY    NWP wireless firmware (erases the radio's flash)"),
+        ("both", "TA + M4    NWP firmware, then the application"),
+    )
+    print(MENU_RULE)
+    for i, (_, label) in enumerate(options):
+        print(f"{i + 1}. {label}")
+    print(MENU_RULE)
+    num = _ask("Select what to flash: ", len(options), logger)
+    if not num:
+        return ""
+    return options[num - 1][0]
+
+
+# -----------------------------------------------------------------------------
+#                              NWP/TA inspection
+# -----------------------------------------------------------------------------
+
+def _version_is_blank(version: str) -> bool:
+    """A version of nothing but zeros and separators means no firmware."""
+    return not [c for c in version if c not in "0.: \t"]
+
+
+def _device_nwp_version(commander, device, serial, port, logger):
+    """
+    Ask the device what NWP/TA firmware it runs.
+
+    return: (answered, version)
+
+    answered says the device replied, whatever it replied. That is the
+    distinction the caller needs: "this board reports no NWP firmware" is a
+    fact to act on, while "nothing could be asked" -- no probe, a serial
+    channel that does not carry this command, a Commander too old to report it
+    -- is not, and must never be mistaken for the first.
+    """
+    argv = [commander, "mfg917", "info", "-d", device, "--json"]
+    if serial and port:
+        argv += ["--serialinterface", "--serialport", port]
+
+    ok, out = _run_quiet(argv, MFG_INFO_TIMEOUT, logger)
+    if not ok:
+        return False, ""
+
+    try:
+        info = json.loads(out)["result"]["mfg917_info"]
+    except (ValueError, KeyError, TypeError) as e:
+        logger.debug(f"Cannot parse mfg917 info output: {e}")
+        return False, ""
+
+    version = str(info.get("nwp_firmware_version", "")).strip()
+    return True, "" if _version_is_blank(version) else version
+
+
+# -----------------------------------------------------------------------------
+#                                  Writing
+# -----------------------------------------------------------------------------
+
+def _load(commander, image, device, serial, port, fixedspeed, logger) -> bool:
+    """
+    Write one .rps, over whichever channel was chosen.
+
+    Both commands route the image by the type in its RPS header, so the same
+    file works for either the M4 application or the NWP firmware.
+    """
     if not _check_image(image, logger):
         return False
+    if os.path.splitext(image)[1].lower() != ".rps":
+        logger.error(f"Flashing needs a .rps image, got: {image}")
+        return False
 
-    logger.info(f"SWD flashing via debug probe: {os.path.basename(image)}")
-    if _run([commander, "flash", image, "-d", device], logger):
+    info = _rps_header(image, logger)
+    if info:
+        what = ("combined M4+NWP" if info["is_combined"]
+                else "M4 application" if info["is_m4"] else "NWP firmware")
+        logger.info(f"Writing {os.path.basename(image)} -- {what}"
+                    + (f", version {info['version']}" if not info["is_m4"] else ""))
+
+    if serial:
+        logger.info(ISP_PROMPT)
+        argv = [commander, "serial", "load", image,
+                "--serialport", port, "--showprogress", "-d", device]
+        if fixedspeed:
+            argv.append("--fixedspeed")
+        hints = SERIAL_HINTS
+    else:
+        argv = [commander, "rps", "load", image, "-d", device, "--tif", "SWD"]
+        hints = SWD_HINTS
+
+    if _run(argv, logger):
         return True
-    logger.error(SWD_HINTS)
+    logger.error(hints)
     return False
 
 
@@ -265,9 +727,9 @@ def platform_flash(using_data=None,
     """
     Flash a SiWx917 target. Returns {"success": bool, "message": str}.
 
-    Channel is auto-detected (see module docstring); -p <port> forces serial.
-    Set SIWX917_FLASH_TA=1 to flash the NWP/TA firmware instead of the app
-    (serial only, and only needed on a fresh or bricked device).
+    Asks which channel (SWD/J-Link or serial/ISP) and what to write (M4 only,
+    TA only, or both). -p <port> forces serial on that port;
+    SIWX917_CHANNEL=swd|serial and SIWX917_FLASH=app|ta|both skip the prompts.
     """
     using_data = using_data or {}
 
@@ -276,7 +738,7 @@ def platform_flash(using_data=None,
         return {"success": False, "message": "Simplicity Commander not available"}
 
     device = _device(using_data)
-    s37, rps = _artifact_paths(using_data, binfile)
+    m4_image = _artifact_paths(using_data, binfile)
 
     # commander negotiates 921600 baud before transferring and aborts the whole
     # load when that handshake fails -- which is what a CH340-class adapter
@@ -288,48 +750,58 @@ def platform_flash(using_data=None,
         logger.info(f"-b {baud} is not used: commander offers only its own "
                     "negotiated rate or --fixedspeed, not an arbitrary value.")
 
-    if os.environ.get("SIWX917_FLASH_TA") == "1":
-        ta_port = port or _sole_port(_usb_serial_ports(), logger)
-        if not ta_port:
-            return {"success": False,
-                    "message": "TA firmware needs serial/ISP: pass -p <port>"}
-        ta_image = os.path.join(_platform_root(), TA_FIRMWARE_RELPATH)
-        logger.info("SIWX917_FLASH_TA=1 -- flashing NWP/TA firmware, not the app.")
-        ok = _flash_serial(commander, ta_image, ta_port, device, fixedspeed, logger)
-        return {"success": ok,
-                "message": "" if ok else "TA firmware flash failed"}
+    serial, chosen = _choose_channel(commander, port, logger)
+    if serial is None:
+        return {"success": False, "message": "no flash channel selected"}
 
-    if port:
-        logger.info(f"Port given ({port}) -- using serial/ISP.")
-        ok = _flash_serial(commander, rps, port, device, fixedspeed, logger)
-        return {"success": ok, "message": "" if ok else "serial/ISP flash failed"}
+    answered, device_ver = _device_nwp_version(
+        commander, device, serial, chosen, logger)
+    if answered:
+        logger.info(f"Device NWP/TA firmware: {device_ver or 'none reported'}")
 
-    # No port: pick the channel ourselves so a bare `tos.py flash` works.
-    if _swd_reachable(commander, device, logger):
-        logger.info("Debug probe reached the chip -- using SWD (no keypress "
-                    "needed). Pass -p <port> to force serial/ISP.")
-        ok = _flash_swd(commander, s37, device, logger)
-        return {"success": ok, "message": "" if ok else "SWD flash failed"}
+    action = _choose_action(logger)
+    if not action:
+        return {"success": False, "message": "flash cancelled"}
 
-    ports = _usb_serial_ports()
-    chosen = _sole_port(ports, logger)
-    if not chosen:
-        logger.error("No way to reach the device: no debug probe responded and "
-                     f"{'no USB serial adapter was found' if not ports else 'the port is ambiguous'}.")
-        logger.error(SWD_HINTS)
-        logger.error(SERIAL_HINTS)
-        return {"success": False, "message": "no usable flash channel found"}
+    ta_image = ""
+    if action in ("ta", "both"):
+        ta_image = _find_ta_image(logger)
+        if not ta_image:
+            return {"success": False, "message": "no usable NWP/TA image"}
 
-    logger.info(f"No debug probe responded -- using serial/ISP on {chosen}.")
-    ok = _flash_serial(commander, rps, chosen, device, fixedspeed, logger)
-    return {"success": ok, "message": "" if ok else "serial/ISP flash failed"}
+    if action == "app":
+        ok = _load(commander, m4_image, device, serial, chosen, fixedspeed,
+                   logger)
+        return {"success": ok, "message": "" if ok else "M4 flash failed"}
 
+    if action == "ta":
+        ok = _load(commander, ta_image, device, serial, chosen, fixedspeed,
+                   logger)
+        if ok:
+            logger.warning(TA_AFTER_WRITE)
+        else:
+            logger.error(BOOT_FAILURE_HINTS)
+        return {"success": ok, "message": "" if ok else "TA flash failed"}
 
-def _sole_port(ports: list, logger) -> str:
-    """One adapter is unambiguous; several need the user to say which."""
-    if len(ports) == 1:
-        return ports[0]
-    if len(ports) > 1:
-        logger.error(f"Several USB serial adapters found: {', '.join(ports)}")
-        logger.error("Pick one with: tos.py flash -p <port>")
-    return ""
+    # both: NWP first, then the application. Not a single merged image -- see
+    # the comment above _find_ta_image's neighbours for what was tried.
+    #
+    # NWP first so a failure stops before the application is touched: a board
+    # with a working application and a broken radio can still be reached over
+    # SWD and told what happened, which is the more recoverable of the two
+    # half-finished states.
+    if not _check_image(m4_image, logger):
+        return {"success": False, "message": "M4 image not built"}
+
+    for image, what in ((ta_image, "NWP"), (m4_image, "M4")):
+        logger.info(f"[{what}] {os.path.basename(image)}")
+        if not _load(commander, image, device, serial, chosen, fixedspeed,
+                     logger):
+            if what == "NWP":
+                logger.error(BOOT_FAILURE_HINTS)
+            else:
+                logger.error("The NWP firmware was written but the application "
+                             "was not. Re-run and pick M4 ONLY.")
+            return {"success": False, "message": f"{what} flash failed"}
+    logger.warning(TA_AFTER_WRITE)
+    return {"success": True, "message": ""}

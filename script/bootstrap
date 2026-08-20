@@ -58,7 +58,34 @@ install_packages_source()
 
 install_packages_pip3()
 {
-    pip3 install --no-cache-dir --upgrade -r "${repo_dir}/requirements.txt"
+    # requirements.txt here is deliberately all comments, and says why: TuyaOpen
+    # pins every Python package this platform needs in its own pyproject.toml,
+    # and re-pinning them here re-resolves the shared .venv and silently
+    # downgrades it. So there is normally nothing for pip to do.
+    #
+    # Running pip anyway is not harmless. A uv-created .venv ships no pip at
+    # all, so a bare `pip3` resolves to whatever the host happens to have: on
+    # macOS that is /usr/bin/pip3, which would install outside the repo, or
+    # refuse under PEP 668 and take `set -e` down with it. OPEN_SDK_PIP is no
+    # help -- export.sh points it at .venv/bin/pip, a name uv does not create.
+    #
+    # So read the file instead of trusting it to stay empty, and if a real
+    # requirement ever turns up, say where it belongs rather than guessing an
+    # interpreter to install it with.
+    local req="${repo_dir}/requirements.txt"
+    if [ ! -f "${req}" ] || ! grep -qE '^[[:space:]]*[^#[:space:]]' "${req}"; then
+        echo "No Python requirements beyond TuyaOpen's pyproject.toml. Skipping pip."
+        return 0
+    fi
+
+    set +x
+    echo ""
+    echo " ** ERROR: ${req} lists requirements, but there is no pip to install"
+    echo "    them with -- the shared .venv is managed by uv, which installs"
+    echo "    none. Add them to TuyaOpen's pyproject.toml and uv.lock instead."
+    echo ""
+    set -x
+    exit 1
 }
 
 install_packages()

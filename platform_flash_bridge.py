@@ -69,9 +69,16 @@ DEFAULT_DEVICE = "SiWG917M111MGTBA"
 # (verified), and only CLI subcommands are used here, so either will do.
 # script/bootstrap_silabs flattens whichever it installed into tools/commander/.
 # Ordered by preference; the first hit wins.
+# The bundle paths are what a macOS install actually looks like: the archive
+# ships Commander-cli.app (or Commander.app for the full build) and
+# script/bootstrap_silabs keeps the bundle whole, because the binary inside
+# resolves its dylibs through @executable_path/../Frameworks. bootstrap_silabs
+# also drops a "commander" symlink next to it, so the first entry usually wins;
+# the bundle paths cover a hand-made install that has no symlink.
 COMMANDER_CANDIDATES = {
     "Linux": ("commander", "commander-cli"),
     "Darwin": ("commander", "commander-cli",
+               "Commander-cli.app/Contents/MacOS/commander-cli",
                "Commander.app/Contents/MacOS/commander"),
     "Windows": ("commander.exe", "commander-cli.exe"),
 }

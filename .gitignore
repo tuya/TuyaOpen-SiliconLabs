@@ -6,5 +6,9 @@ sdks
 TuyaOpen
 .prepare
 *__pycache__*
-# siwx917_kermit.sh writes its interaction logs next to itself.
+# Local recovery/debugging tool, deliberately not shipped: the knowledge it
+# carried (ROM bootloader menu keys, the C-Kermit settings the ROM receiver
+# needs) is in GETTING_STARTED.md instead, which is the part that cannot be
+# re-derived. Keep your own copy here if you use it.
+script/siwx917_kermit.sh
 script/siwx917-logs/

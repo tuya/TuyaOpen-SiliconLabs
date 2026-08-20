@@ -61,7 +61,7 @@ install_packages_brew()
         git
         git-lfs
         grep
-        ninja-build
+        ninja
         openjdk@21
         unzip
         wget
@@ -112,8 +112,18 @@ install_packages()
     fi
 
     if [ -n "${skip_reason}" ]; then
-        # Archive tools differ by host: Windows takes both the toolchain and
-        # the nested Commander build as zips, so it needs neither xz nor bzip2.
+        # Archive tools differ by host, so ask only for what actually gets
+        # invoked. Nothing here shells out to xz or bzip2 directly -- tar does,
+        # and only for the formats that host downloads:
+        #
+        #   Linux    toolchain .tar.bz2, commander .tar.bz2  -> GNU tar needs bzip2
+        #   macOS    toolchain .tar.xz, JRE .tar.gz          -> BSD tar handles
+        #                                                       both internally
+        #   Windows  everything .zip                         -> neither
+        #
+        # Asking for xz was wrong on every host: Linux never downloads a .tar.xz
+        # and macOS does not ship the binary, so a stock Mac aborted here over a
+        # tool it did not need.
         #
         # Two tools are on no list: unzip, because script/util falls back to
         # python for zip archives, and java, because install_jre fetches a JRE
@@ -121,7 +131,8 @@ install_packages()
         local required
         case "$(uname -s)" in
             MINGW* | MSYS* | CYGWIN*) required="git" ;;
-            *) required="git tar bzip2 xz" ;;
+            Darwin)                   required="git tar" ;;
+            *)                        required="git tar bzip2" ;;
         esac
 
         local missing=""

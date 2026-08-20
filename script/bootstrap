@@ -290,7 +290,13 @@ install_jre()
 {
     local jre_dir="${repo_dir}/tools/jre"
 
-    if command -v java > /dev/null 2>&1; then
+    # Run it, do not just look for it: /usr/bin/java on macOS is a stub that
+    # exists whether or not a JDK does, and answers `java -version` with
+    # "Unable to locate a Java Runtime". Testing with `command -v` there skips
+    # the download and leaves slc to fail much later, reporting only "An error
+    # has occurred. See the log file". brew's openjdk is keg-only and does not
+    # relink /usr/local/bin/java, so installing one does not settle it either.
+    if java -version > /dev/null 2>&1; then
         echo "'java' found on PATH. Skipping JRE install"
         return 0
     fi
@@ -348,6 +354,14 @@ install_jre()
     if [ -z "${inner}" ]; then
         echo " ** ERROR: unexpected layout inside the JRE archive" >&2
         exit 1
+    fi
+    # macOS publishes it as an application bundle -- the top-level directory
+    # holds Contents/{Home,MacOS,Info.plist} and bin/ sits under Contents/Home,
+    # not at the root as it does on Linux and Windows. Descend before copying so
+    # the installed layout is tools/jre/bin/java on every host, which is the one
+    # path script/slc_cli looks for.
+    if [ -d "${inner}/Contents/Home" ]; then
+        inner="${inner}/Contents/Home"
     fi
     mkdir -p "${jre_dir}"
     cp -R "${inner}/." "${jre_dir}/"

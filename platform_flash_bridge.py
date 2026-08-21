@@ -42,8 +42,10 @@ environment variables below skip the prompts for CI and production programming.
 
 Writing NWP/TA firmware erases the radio's flash first; an interrupted write has
 left a board needing recovery. It therefore happens only when explicitly asked
-for, never as a repair for firmware that is merely different. When a device
-flashes cleanly and the radio still will not start, see BOOT_FAILURE_HINTS.
+for, never as a repair for firmware that is merely different, and the menu
+says when the image on disk is the one the device already runs. When a device
+flashes cleanly and the radio still will not start, GETTING_STARTED.md has the
+recovery procedure under "Recovering a device whose radio will not start".
 
 This module is loaded by importlib.util.spec_from_file_location() under a
 synthetic module name, so its package context is not set up and it cannot
@@ -169,38 +171,43 @@ SWD_HINTS = """  SWD troubleshooting:
 
 # Printed after a TA write. A completed transfer is not a working radio, and
 # saying so is the whole point -- "Platform flash success" would imply more.
+#
+# This used to be followed by twenty-odd lines on 16056/16059 and the ROM
+# bootloader menu. That is a boot symptom, not a write outcome, and printing
+# the recovery procedure for a symptom nobody had seen yet only buried the one
+# step that mattered. GETTING_STARTED.md carries it; this points there.
 TA_AFTER_WRITE = """  The transfer finished, which is not the same as a radio that starts.
-  Reset the board and check the application log for:
+  Power-cycle the board -- the install is finalised at reset, and a probe's
+  reset does not always do it -- then check the application log for:
       WiFi initialization success
       Running TA fw: <version>
-  If it still reports 16056 or 16059, see the boot-failure hints below."""
+  If instead it reports WiFi initialization error 16056 or 16059, or
+  m4_ta_secure_handshake: 0x7, see GETTING_STARTED.md, "Recovering a device
+  whose radio will not start". Rewriting the image is the last thing to try
+  there, not the first."""
 
-BOOT_FAILURE_HINTS = """  Application starts but the radio does not:
-      WiFi initialization error 16056   no valid NWP firmware selected/present
-      WiFi initialization error 16059   NWP never answered at all
-      Failed to bring m4_ta_secure_handshake: 0x7   (timeout, follows either)
+# Printed when writing the NWP image fails over a link that has already proven
+# itself. Ordered by cost, and each claim is measured: 2026-08-21, two writes
+# over SWD reported this and the radio kept running both times.
+#
+# The tell is which line Commander stops on. A write that really did not land
+# never reaches "Resetting"; one that did prints it and says DONE. Both TA
+# failures stopped at the upgrade wait, while an M4 write over the same probe
+# printed "Resetting" and succeeded -- so the probe is not the variable.
+TA_WRITE_FAILED = """  The link worked and the data was sent. What timed out is the confirmation
+  that the NWP finished installing it, which Commander reports as
+  "Flashloader is not ready". That is not evidence of a damaged radio: the
+  NWP takes the RAM-resident flash-loader down with it when it resets to
+  finalise, so the confirmation has nothing left to answer it.
 
-    `mfg917 info` reporting an nwp_firmware_version proves only that metadata
-    exists -- not that the image is intact or that it is the one the bootloader
-    loads. Before rewriting anything:
-
-      power-cycle first   a staged image is finalised at reset, and a debug
-                          probe's reset may not be enough. Costs nothing and
-                          has recovered a board that looked dead.
-      default-image       a slot can pass integrity and still not be the one
-      selector            the bootloader loads. Only the ROM bootloader menu
-                          can read or change that.
-
-    Ask the ROM bootloader, which can tell these apart. Put the chip in ISP
-    mode (GPIO_34 low, then Reset), open the ISP UART (GPIO_8/GPIO_9) in any
-    serial terminal, send 0x1C then 'U' for the menu, and:
-
-      'K' + slot   check that slot's integrity   (read-only)
-      '5' + slot   point the default at it       (a few bytes)
-      'B' + slot   burn new firmware into it     (~1.6 MB, last resort)
-
-    In that order -- the cost differs by orders of magnitude. GETTING_STARTED.md
-    has the full menu and the C-Kermit settings the ROM receiver needs."""
+  Cheapest first:
+    1. power-cycle the board -- pull the power, not the reset button
+    2. read the version back, and compare it with what was printed above:
+         commander mfg917 info -d {device} --json
+    3. only if it is gone or changed does the ROM bootloader come into it.
+       GETTING_STARTED.md, "Recovering a device whose radio will not start",
+       has the menu and the order: 'K' to check, '5' to point the default at
+       a slot, and only then 'B' to burn."""
 
 SERIAL_HINTS = """  Serial/ISP troubleshooting:
     - chip must be in ISP mode: GPIO_34 low, then Reset
@@ -381,11 +388,18 @@ def _rps_header(image: str, logger):
     }
 
 
-def _find_ta_image(logger) -> str:
-    """The NWP/TA image shipped here, or "" when it is missing."""
+def _find_ta_image(logger, quiet=False) -> str:
+    """
+    The NWP/TA image shipped here, or "" when it is missing.
+
+    quiet=True for the look before the menu, where a missing image is not yet
+    an error -- it only becomes one if NWP firmware is then chosen, which the
+    caller checks after the choice is made.
+    """
     image = os.path.join(_platform_root(), TA_FIRMWARE_RELPATH)
     if not os.path.isfile(image):
-        logger.error(f"No NWP/TA firmware at {TA_FIRMWARE_RELPATH}")
+        if not quiet:
+            logger.error(f"No NWP/TA firmware at {TA_FIRMWARE_RELPATH}")
         return ""
     return image
 
@@ -605,12 +619,46 @@ def _is_jlink_vcom(port: str) -> bool:
     return False
 
 
-def _choose_action(logger) -> str:
+def _ta_version_note(ta_image, answered, device_ver, logger) -> str:
+    """
+    What the menu should say about writing the NWP image, from the two versions
+    already in hand: the device's and the file's.
+
+    Both were being read and then only logged, one line apart, with nothing
+    comparing them. Writing an image the device already runs erases a working
+    radio to put the same bytes back, and if that write then reports a timeout
+    it costs a recovery scare on top -- which is what happened twice on
+    2026-08-21, both sides reading 1611.2.1.1.255.11.63.
+
+    This annotates; it does not block. Rewriting the same version is sometimes
+    exactly the repair (a corrupt image reports the same version as a good one
+    -- see GETTING_STARTED.md), so the choice stays with whoever is asking.
+    """
+    if not ta_image:
+        return "No NWP image is shipped here, so 2 and 3 have nothing to write."
+
+    info = _rps_header(ta_image, logger)
+    if not info or info["is_m4"]:
+        return ""
+
+    file_ver = info["version"]
+    if not file_ver:
+        return ""
+    if not answered or _version_is_blank(device_ver):
+        return f"The image on disk is {file_ver}; the device reported no version."
+    if file_ver == device_ver:
+        return (f"The device already runs {file_ver}: 2 and 3 write the same "
+                "bytes back.")
+    return f"2 and 3 would replace {device_ver} with {file_ver}."
+
+
+def _choose_action(logger, ta_note="") -> str:
     """
     Pick what to write. Returns one of FLASH_ACTIONS, or "" to abort.
 
     Writing NWP/TA firmware erases the radio first, so this is never inferred
     from device state: it is asked, or given outright via SIWX917_FLASH.
+    ta_note, when given, is printed just above the prompt.
     """
     forced = os.environ.get(FLASH_ACTION_ENV, "").strip().lower()
     # SIWX917_FLASH_TA=1 predates this and meant "write the TA firmware instead
@@ -634,6 +682,11 @@ def _choose_action(logger) -> str:
     for i, (_, label) in enumerate(options):
         print(f"{i + 1}. {label}")
     print(MENU_RULE)
+    # After the rule, not appended to the entries: the NWP label already runs
+    # to 58 columns and hanging a version pair off it wraps on a narrow
+    # terminal. Last thing printed before the prompt is also the thing read.
+    if ta_note:
+        print(ta_note)
     num = _ask("Select what to flash: ", len(options), logger)
     if not num:
         return ""
@@ -683,12 +736,16 @@ def _device_nwp_version(commander, device, serial, port, logger):
 #                                  Writing
 # -----------------------------------------------------------------------------
 
-def _load(commander, image, device, serial, port, fixedspeed, logger) -> bool:
+def _load(commander, image, device, serial, port, fixedspeed, logger,
+          link_proven=False) -> bool:
     """
     Write one .rps, over whichever channel was chosen.
 
     Both commands route the image by the type in its RPS header, so the same
     file works for either the M4 application or the NWP firmware.
+
+    link_proven says the channel has already carried a reply from the device,
+    which decides whether the wiring hints are worth printing on failure.
     """
     if not _check_image(image, logger):
         return False
@@ -716,7 +773,13 @@ def _load(commander, image, device, serial, port, fixedspeed, logger) -> bool:
 
     if _run(argv, logger):
         return True
-    logger.error(hints)
+    # Wiring and power hints help only when the channel never came up. Once it
+    # has -- mfg917 info answered over this same link, the flash-loader
+    # uploaded, the data went out -- "is the board powered? is SWCLK on
+    # GPIO_31?" is false and sends the reader the wrong way. It did exactly
+    # that on 2026-08-21, after a link that had just carried 1.6 MB.
+    if not link_proven:
+        logger.error(hints)
     return False
 
 
@@ -766,28 +829,31 @@ def platform_flash(using_data=None,
     if answered:
         logger.info(f"Device NWP/TA firmware: {device_ver or 'none reported'}")
 
-    action = _choose_action(logger)
+    # Locate and read the NWP image before the menu, so the entries that would
+    # write it can say whether that changes anything. Quiet: a missing image is
+    # only an error once NWP firmware is actually chosen, below.
+    ta_image = _find_ta_image(logger, quiet=True)
+    action = _choose_action(
+        logger, _ta_version_note(ta_image, answered, device_ver, logger))
     if not action:
         return {"success": False, "message": "flash cancelled"}
 
-    ta_image = ""
-    if action in ("ta", "both"):
-        ta_image = _find_ta_image(logger)
-        if not ta_image:
-            return {"success": False, "message": "no usable NWP/TA image"}
+    if action in ("ta", "both") and not ta_image:
+        _find_ta_image(logger)          # now it is an error, so say so
+        return {"success": False, "message": "no usable NWP/TA image"}
 
     if action == "app":
         ok = _load(commander, m4_image, device, serial, chosen, fixedspeed,
-                   logger)
+                   logger, answered)
         return {"success": ok, "message": "" if ok else "M4 flash failed"}
 
     if action == "ta":
         ok = _load(commander, ta_image, device, serial, chosen, fixedspeed,
-                   logger)
+                   logger, answered)
         if ok:
             logger.warning(TA_AFTER_WRITE)
-        else:
-            logger.error(BOOT_FAILURE_HINTS)
+        elif answered:
+            logger.error(TA_WRITE_FAILED.format(device=device))
         return {"success": ok, "message": "" if ok else "TA flash failed"}
 
     # both: NWP first, then the application. Not a single merged image -- see
@@ -803,9 +869,10 @@ def platform_flash(using_data=None,
     for image, what in ((ta_image, "NWP"), (m4_image, "M4")):
         logger.info(f"[{what}] {os.path.basename(image)}")
         if not _load(commander, image, device, serial, chosen, fixedspeed,
-                     logger):
+                     logger, answered):
             if what == "NWP":
-                logger.error(BOOT_FAILURE_HINTS)
+                if answered:
+                    logger.error(TA_WRITE_FAILED.format(device=device))
             else:
                 logger.error("The NWP firmware was written but the application "
                              "was not. Re-run and pick M4 ONLY.")

@@ -33,7 +33,13 @@
 #include <stdbool.h>
 #include "tkl_gpio.h"
 #include "tuya_error_code.h"
-#include "sl_gpio_board.h"
+/* em_device.h, not sl_gpio_board.h: the port constants this file switches on
+ * (HP / ULP / UULP_VBAT) come from RTE_Device_917.h, which em_device.h pulls
+ * in, and they are the same on every board -- verified against two. What used
+ * to be included here was the *board's* sl_gpio_board.h, which declares only
+ * the pads that board brings out, and that is what made the pin table below
+ * fail to compile on a board that leaves one out. */
+#include "em_device.h"
 #include "sl_si91x_driver_gpio.h"
 
 // -----------------------------------------------------------------------------
@@ -61,64 +67,100 @@
 
 /********************************************************************
  * Pin mapping table
- *   + TUYA GPIO [0:4] map with
- *       SI91X UULP GPIO [0:4]
- *   + TUYA GPIO [6:12], 15, [25:34], [46:57] map with
- *       SI91X GPIO [6:12], 15, [25:34], [46:57]
- *   + TUYA GPIO [20:24], [35:41] map with
- *       SI91X ULP GPIO [0:4], [5:11]
- * More detail see below
- ********************************************************************
- *   TUYA_GPIO       |    Si91x GPIO
+ *
+ * TUYA GPIO number -> (SiWx917 port, pad index), and nothing about any
+ * particular board.
+ *
+ *   TUYA GPIO  [0:4]                        -> UULP GPIO [0:4]
+ *   TUYA GPIO  [6:12], 15, [25:34], [46:57] -> HP   GPIO, same number
+ *   TUYA GPIO  [20:24], [35:41]             -> ULP  GPIO [0:4], [5:11]
+ *
+ * The values are the SoC's. An HP pad is (HP, n), a UULP pad is
+ * (UULP_VBAT, n), and a ULP pad is (ULP, n) -- checked against
+ * RTE_Device_917.h for two different boards, where each of these is defined
+ * identically, because none of it is board-specific.
+ *
+ * This used to read SL_SI91X_<pad>_PIN/_PORT out of sl_gpio_board.h, which is
+ * the *board's* file: a board declares only the pads it brings out. So the
+ * table stopped compiling on any board that leaves one out -- BRD2605A omits
+ * ULP_GPIO_3 and UULP_GPIO_4, and its own RTE_Device_917.h does not define
+ * them either, so that is the board stating a fact rather than an oversight.
+ * SIWX917_AI_DEV_KIT built only because it ships no sl_gpio_board.h of its own
+ * and so inherited the chip-wide default that declares every pad.
+ *
+ * Which pads a board brings out belongs to the board layer, and is already
+ * there: boards/SiWx917/<BOARD>/Kconfig names the pins that board uses. This
+ * is how T5AI does it too -- one flat, unconditional pinmap in the chip layer
+ * and no board conditionals in it at all.
+ *
+ * HP and UULP rows take one argument because for them the TUYA number and the
+ * pad index are the same; writing it once keeps the two from drifting apart.
  ********************************************************************/
+
+/* ULP pads are reached on the ULP port by their own index on radio-board base
+ * versions, and on the HP port at 64 + index otherwise. That is the SDK's own
+ * distinction -- RTE_ULP_GPIO_n_PORT_ID, keyed on
+ * SLI_SI91X_MCU_CONFIG_RADIO_BOARD_BASE_VER -- and a property of the silicon
+ * revision rather than of a board, so it belongs here: one condition for the
+ * whole class, not one per pad. */
+#ifdef SLI_SI91X_MCU_CONFIG_RADIO_BOARD_BASE_VER
+#define ULP_PAD(n) .pin = (n), .port = ULP
+#else
+#define ULP_PAD(n) .pin = 64 + (n), .port = HP
+#endif
+
+#define X_UULP(n)      {.pin_id = TUYA_GPIO_NUM_##n, .pin = (n), .port = UULP_VBAT},
+#define X_HP(n)        {.pin_id = TUYA_GPIO_NUM_##n, .pin = (n), .port = HP},
+#define X_ULP(tuya, n) {.pin_id = TUYA_GPIO_NUM_##tuya, ULP_PAD(n)},
+
 #define SI91X_PIN_MAPPING                                                                                              \
-    X_GPIO(GPIO_NUM_0, SI91X_UULP_GPIO_0)                                                                              \
-    X_GPIO(GPIO_NUM_1, SI91X_UULP_GPIO_1)                                                                              \
-    X_GPIO(GPIO_NUM_2, SI91X_UULP_GPIO_2)                                                                              \
-    X_GPIO(GPIO_NUM_3, SI91X_UULP_GPIO_3)                                                                              \
-    X_GPIO(GPIO_NUM_4, SI91X_UULP_GPIO_4)                                                                              \
-    X_GPIO(GPIO_NUM_6, SI91X_GPIO_6)                                                                                   \
-    X_GPIO(GPIO_NUM_7, SI91X_GPIO_7)                                                                                   \
-    X_GPIO(GPIO_NUM_8, SI91X_GPIO_8)                                                                                   \
-    X_GPIO(GPIO_NUM_9, SI91X_GPIO_9)                                                                                   \
-    X_GPIO(GPIO_NUM_10, SI91X_GPIO_10)                                                                                 \
-    X_GPIO(GPIO_NUM_11, SI91X_GPIO_11)                                                                                 \
-    X_GPIO(GPIO_NUM_12, SI91X_GPIO_12)                                                                                 \
-    X_GPIO(GPIO_NUM_15, SI91X_GPIO_15)                                                                                 \
-    X_GPIO(GPIO_NUM_25, SI91X_GPIO_25)                                                                                 \
-    X_GPIO(GPIO_NUM_26, SI91X_GPIO_26)                                                                                 \
-    X_GPIO(GPIO_NUM_27, SI91X_GPIO_27)                                                                                 \
-    X_GPIO(GPIO_NUM_28, SI91X_GPIO_28)                                                                                 \
-    X_GPIO(GPIO_NUM_29, SI91X_GPIO_29)                                                                                 \
-    X_GPIO(GPIO_NUM_30, SI91X_GPIO_30)                                                                                 \
-    X_GPIO(GPIO_NUM_31, SI91X_GPIO_31)                                                                                 \
-    X_GPIO(GPIO_NUM_32, SI91X_GPIO_32)                                                                                 \
-    X_GPIO(GPIO_NUM_33, SI91X_GPIO_33)                                                                                 \
-    X_GPIO(GPIO_NUM_34, SI91X_GPIO_34)                                                                                 \
-    X_GPIO(GPIO_NUM_46, SI91X_GPIO_46)                                                                                 \
-    X_GPIO(GPIO_NUM_47, SI91X_GPIO_47)                                                                                 \
-    X_GPIO(GPIO_NUM_48, SI91X_GPIO_48)                                                                                 \
-    X_GPIO(GPIO_NUM_49, SI91X_GPIO_49)                                                                                 \
-    X_GPIO(GPIO_NUM_50, SI91X_GPIO_50)                                                                                 \
-    X_GPIO(GPIO_NUM_51, SI91X_GPIO_51)                                                                                 \
-    X_GPIO(GPIO_NUM_52, SI91X_GPIO_52)                                                                                 \
-    X_GPIO(GPIO_NUM_53, SI91X_GPIO_53)                                                                                 \
-    X_GPIO(GPIO_NUM_54, SI91X_GPIO_54)                                                                                 \
-    X_GPIO(GPIO_NUM_55, SI91X_GPIO_55)                                                                                 \
-    X_GPIO(GPIO_NUM_56, SI91X_GPIO_56)                                                                                 \
-    X_GPIO(GPIO_NUM_57, SI91X_GPIO_57)                                                                                 \
-    X_GPIO(GPIO_NUM_20, SI91X_ULP_GPIO_0)                                                                              \
-    X_GPIO(GPIO_NUM_21, SI91X_ULP_GPIO_1)                                                                              \
-    X_GPIO(GPIO_NUM_22, SI91X_ULP_GPIO_2)                                                                              \
-    X_GPIO(GPIO_NUM_23, SI91X_ULP_GPIO_3)                                                                              \
-    X_GPIO(GPIO_NUM_24, SI91X_ULP_GPIO_4)                                                                              \
-    X_GPIO(GPIO_NUM_35, SI91X_ULP_GPIO_5)                                                                              \
-    X_GPIO(GPIO_NUM_36, SI91X_ULP_GPIO_6)                                                                              \
-    X_GPIO(GPIO_NUM_37, SI91X_ULP_GPIO_7)                                                                              \
-    X_GPIO(GPIO_NUM_38, SI91X_ULP_GPIO_8)                                                                              \
-    X_GPIO(GPIO_NUM_39, SI91X_ULP_GPIO_9)                                                                              \
-    X_GPIO(GPIO_NUM_40, SI91X_ULP_GPIO_10)                                                                             \
-    X_GPIO(GPIO_NUM_41, SI91X_ULP_GPIO_11)
+    X_UULP(0)                                                                                                          \
+    X_UULP(1)                                                                                                          \
+    X_UULP(2)                                                                                                          \
+    X_UULP(3)                                                                                                          \
+    X_UULP(4)                                                                                                          \
+    X_HP(6)                                                                                                            \
+    X_HP(7)                                                                                                            \
+    X_HP(8)                                                                                                            \
+    X_HP(9)                                                                                                            \
+    X_HP(10)                                                                                                           \
+    X_HP(11)                                                                                                           \
+    X_HP(12)                                                                                                           \
+    X_HP(15)                                                                                                           \
+    X_HP(25)                                                                                                           \
+    X_HP(26)                                                                                                           \
+    X_HP(27)                                                                                                           \
+    X_HP(28)                                                                                                           \
+    X_HP(29)                                                                                                           \
+    X_HP(30)                                                                                                           \
+    X_HP(31)                                                                                                           \
+    X_HP(32)                                                                                                           \
+    X_HP(33)                                                                                                           \
+    X_HP(34)                                                                                                           \
+    X_HP(46)                                                                                                           \
+    X_HP(47)                                                                                                           \
+    X_HP(48)                                                                                                           \
+    X_HP(49)                                                                                                           \
+    X_HP(50)                                                                                                           \
+    X_HP(51)                                                                                                           \
+    X_HP(52)                                                                                                           \
+    X_HP(53)                                                                                                           \
+    X_HP(54)                                                                                                           \
+    X_HP(55)                                                                                                           \
+    X_HP(56)                                                                                                           \
+    X_HP(57)                                                                                                           \
+    X_ULP(20, 0)                                                                                                       \
+    X_ULP(21, 1)                                                                                                       \
+    X_ULP(22, 2)                                                                                                       \
+    X_ULP(23, 3)                                                                                                       \
+    X_ULP(24, 4)                                                                                                       \
+    X_ULP(35, 5)                                                                                                       \
+    X_ULP(36, 6)                                                                                                       \
+    X_ULP(37, 7)                                                                                                       \
+    X_ULP(38, 8)                                                                                                       \
+    X_ULP(39, 9)                                                                                                       \
+    X_ULP(40, 10)                                                                                                      \
+    X_ULP(41, 11)
 
 typedef struct {
     TUYA_GPIO_NUM_E pin_id;
@@ -126,11 +168,12 @@ typedef struct {
     uint8_t         port;
 } pin_map_t;
 
-static const pin_map_t gpio_list[] = {
-#define X_GPIO(TUYA_ID, SL_ID) {.pin_id = TUYA_##TUYA_ID, .pin = SL_##SL_ID##_PIN, .port = SL_##SL_ID##_PORT},
-    SI91X_PIN_MAPPING
-#undef X_GPIO
-};
+static const pin_map_t gpio_list[] = {SI91X_PIN_MAPPING};
+
+#undef X_ULP
+#undef X_HP
+#undef X_UULP
+#undef ULP_PAD
 
 typedef struct {
     TUYA_GPIO_NUM_E        pin_id;

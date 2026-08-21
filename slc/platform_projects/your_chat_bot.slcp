@@ -26,6 +26,23 @@ component:
   - id: sl_tuyaopen_psram_config
     from: tuyaopen-si91x
 
+  # The PSRAM driver, and the device fitted. This project is what turns the
+  # PSRAM feature on -- SLI_SI91X_MCU_ENABLE_PSRAM_FEATURE, in the define
+  # section below -- so naming the device is its job too: with the feature on
+  # and no device selected, rsi_deepsleep_soc.c stops at #error "No valid
+  # PSRAM configuration defined", because it needs one of
+  # SLI_SI91X_MCU_PSRAM_APS{1604M_SQR,6404L_SQH,6404L_SQRH} to pick a config
+  # header. Board components may select one but need not: SIWX917_AI_DEV_KIT
+  # and brd4340a do, BRD2605A declares only external_psram_8mb, and relying on
+  # the board is what made this build depend on which board it was. Every
+  # Silabs *_psram.slcp example lists these two in the project for the same
+  # reason. APS6404L-SQH is what the SDK selects nearly everywhere (33 of 39
+  # selections) and what the other 8MB SiWx917 boards use.
+  - id: psram_core
+    from: wiseconnect3_sdk
+  - id: psram_aps6404l_sqh
+    from: wiseconnect3_sdk
+
   # Workaround for wiseconnect sdk 4.0.0
   - id: opn_config
     from: tuyaopen-si91x

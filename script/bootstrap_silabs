@@ -140,7 +140,36 @@ install_commander()
         echo " ** ERROR: unexpected layout inside $(basename "${nested}")" >&2
         exit 1
     fi
-    cp -R "${top}/." .
+
+    # macOS ships an application bundle, everything else a plain directory:
+    #
+    #   Linux    commander/{commander-cli,lib,...}
+    #   Windows  Simplicity Commander/{commander-cli.exe,...}
+    #   macOS    Commander-cli.app/Contents/MacOS/commander-cli
+    #            Commander-cli.app/Contents/Frameworks/*.dylib
+    #
+    # The bundle has to stay whole: its binary finds those dylibs through
+    # @executable_path/../Frameworks, so lifting Contents/ up one level (which
+    # `cp -R "${top}/."` does) leaves a binary that cannot start -- and the
+    # verification below then fails with nothing to point at. Copy the bundle
+    # as a unit and let the symlink step give it the usual entry point.
+    case "${top}" in
+        *.app)
+            cp -R "${top}" .
+            local bundle
+            bundle=$(basename "${top}")
+            local inner_bin
+            for inner_bin in commander-cli commander; do
+                if [ -x "${bundle}/Contents/MacOS/${inner_bin}" ]; then
+                    ln -sf "${bundle}/Contents/MacOS/${inner_bin}" commander
+                    break
+                fi
+            done
+            ;;
+        *)
+            cp -R "${top}/." .
+            ;;
+    esac
     rm -rf "${staging}"
 
     # CMakeLists.txt and platform_flash_bridge.py both reach for a plain

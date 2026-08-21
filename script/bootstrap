@@ -51,25 +51,6 @@ install_packages_rpm()
     echo 'rpm not supported currently' && false
 }
 
-install_packages_brew()
-{
-    echo 'Installing script dependencies...'
-
-    brew_packages=(
-        ccache
-        coreutils
-        git
-        git-lfs
-        grep
-        ninja-build
-        openjdk@21
-        unzip
-        wget
-        bzip2
-    )
-    brew install "${brew_packages[@]}"
-}
-
 install_packages_source()
 {
     echo 'source not supported currently' && false
@@ -77,11 +58,51 @@ install_packages_source()
 
 install_packages_pip3()
 {
-    pip3 install --no-cache-dir --upgrade -r "${repo_dir}/requirements.txt"
+    # requirements.txt here is deliberately all comments, and says why: TuyaOpen
+    # pins every Python package this platform needs in its own pyproject.toml,
+    # and re-pinning them here re-resolves the shared .venv and silently
+    # downgrades it. So there is normally nothing for pip to do.
+    #
+    # Running pip anyway is not harmless. A uv-created .venv ships no pip at
+    # all, so a bare `pip3` resolves to whatever the host happens to have: on
+    # macOS that is /usr/bin/pip3, which would install outside the repo, or
+    # refuse under PEP 668 and take `set -e` down with it. OPEN_SDK_PIP is no
+    # help -- export.sh points it at .venv/bin/pip, a name uv does not create.
+    #
+    # So read the file instead of trusting it to stay empty, and if a real
+    # requirement ever turns up, say where it belongs rather than guessing an
+    # interpreter to install it with.
+    local req="${repo_dir}/requirements.txt"
+    if [ ! -f "${req}" ] || ! grep -qE '^[[:space:]]*[^#[:space:]]' "${req}"; then
+        echo "No Python requirements beyond TuyaOpen's pyproject.toml. Skipping pip."
+        return 0
+    fi
+
+    set +x
+    echo ""
+    echo " ** ERROR: ${req} lists requirements, but there is no pip to install"
+    echo "    them with -- the shared .venv is managed by uv, which installs"
+    echo "    none. Add them to TuyaOpen's pyproject.toml and uv.lock instead."
+    echo ""
+    set -x
+    exit 1
 }
 
 install_packages()
 {
+    # Homebrew is deliberately not consulted: nothing here installs system
+    # packages on a Mac. Everything the rest of the bootstrap uses is either
+    # part of the Command Line Tools (git, tar, curl, python3), fetched into the
+    # repo the way every other tool is (install_jre -> tools/jre), or pinned by
+    # TuyaOpen's own pyproject.toml and delivered through .venv (cmake, ninja).
+    #
+    # A Mac without Homebrew already bootstrapped fine through the check below,
+    # so installing ten formulas when Homebrew happens to be present made the
+    # host change while the build did not: brew's openjdk is keg-only and never
+    # becomes `java`, ccache is wired into no build file here, coreutils and
+    # grep install as gsed/ggrep and shadow nothing, and wget and unzip both
+    # have fallbacks in script/util. This is also the only place in TuyaOpen
+    # that would install system packages at all -- no other platform does.
     PM=source
     if command -v apt-get; then
         PM=apt
@@ -89,11 +110,10 @@ install_packages()
         PM=rpm
     elif command -v opkg; then
         PM=opkg
-    elif command -v brew; then
-        PM=brew
     fi
 
-    # Two situations where nothing can be installed here:
+    # Three situations where nothing is installed here:
+    #   - macOS, by the choice above
     #   - no package manager at all (Windows under Git Bash leaves PM=source,
     #     and install_packages_source just fails)
     #   - apt but sudo wants a password, as on a CI runner; `sudo apt-get`
@@ -103,17 +123,31 @@ install_packages()
     # Carrying on is usually right, since those hosts normally already have
     # what is needed. But carrying on blindly only moves the failure to an
     # error that says nothing about the cause, so check what the rest of the
-    # bootstrap actually uses and stop here naming anything absent.
+    # bootstrap actually uses and stop here naming anything absent. Naming it
+    # and stopping leaves the choice of what to install on the host with the
+    # person who owns the host.
     local skip_reason=""
-    if [ "${PM}" = "source" ]; then
+    if [ "$(uname -s)" = "Darwin" ]; then
+        skip_reason="this script installs no system packages on macOS"
+    elif [ "${PM}" = "source" ]; then
         skip_reason="no supported package manager on this host"
     elif [ "${PM}" = "apt" ] && ! sudo -n true 2> /dev/null; then
         skip_reason="sudo is not available without a password"
     fi
 
     if [ -n "${skip_reason}" ]; then
-        # Archive tools differ by host: Windows takes both the toolchain and
-        # the nested Commander build as zips, so it needs neither xz nor bzip2.
+        # Archive tools differ by host, so ask only for what actually gets
+        # invoked. Nothing here shells out to xz or bzip2 directly -- tar does,
+        # and only for the formats that host downloads:
+        #
+        #   Linux    toolchain .tar.bz2, commander .tar.bz2  -> GNU tar needs bzip2
+        #   macOS    toolchain .tar.xz, JRE .tar.gz          -> BSD tar handles
+        #                                                       both internally
+        #   Windows  everything .zip                         -> neither
+        #
+        # Asking for xz was wrong on every host: Linux never downloads a .tar.xz
+        # and macOS does not ship the binary, so a stock Mac aborted here over a
+        # tool it did not need.
         #
         # Two tools are on no list: unzip, because script/util falls back to
         # python for zip archives, and java, because install_jre fetches a JRE
@@ -121,7 +155,8 @@ install_packages()
         local required
         case "$(uname -s)" in
             MINGW* | MSYS* | CYGWIN*) required="git" ;;
-            *) required="git tar bzip2 xz" ;;
+            Darwin)                   required="git tar" ;;
+            *)                        required="git tar bzip2" ;;
         esac
 
         local missing=""
@@ -279,7 +314,13 @@ install_jre()
 {
     local jre_dir="${repo_dir}/tools/jre"
 
-    if command -v java > /dev/null 2>&1; then
+    # Run it, do not just look for it: /usr/bin/java on macOS is a stub that
+    # exists whether or not a JDK does, and answers `java -version` with
+    # "Unable to locate a Java Runtime". Testing with `command -v` there skips
+    # the download and leaves slc to fail much later, reporting only "An error
+    # has occurred. See the log file". brew's openjdk is keg-only and does not
+    # relink /usr/local/bin/java, so installing one does not settle it either.
+    if java -version > /dev/null 2>&1; then
         echo "'java' found on PATH. Skipping JRE install"
         return 0
     fi
@@ -298,8 +339,8 @@ install_jre()
     # com.silabs.ss.framework.uc.extension among them -- so a 17 runtime cannot
     # load them. It fails as an UnsupportedClassVersionError that slc reports
     # only as "An error has occurred. See the log file", which is what made a
-    # CI run spend 51 minutes to say nothing. install_packages_apt already asks
-    # for openjdk-21; the openjdk@17 on the brew list is the stale entry.
+    # CI run spend 51 minutes to say nothing. install_packages_apt asks for
+    # openjdk-21 for the same reason.
     local os arch ext
     case "$(uname -s)" in
         Darwin) os="mac" ext="tar.gz" ;;
@@ -337,6 +378,14 @@ install_jre()
     if [ -z "${inner}" ]; then
         echo " ** ERROR: unexpected layout inside the JRE archive" >&2
         exit 1
+    fi
+    # macOS publishes it as an application bundle -- the top-level directory
+    # holds Contents/{Home,MacOS,Info.plist} and bin/ sits under Contents/Home,
+    # not at the root as it does on Linux and Windows. Descend before copying so
+    # the installed layout is tools/jre/bin/java on every host, which is the one
+    # path script/slc_cli looks for.
+    if [ -d "${inner}/Contents/Home" ]; then
+        inner="${inner}/Contents/Home"
     fi
     mkdir -p "${jre_dir}"
     cp -R "${inner}/." "${jre_dir}/"

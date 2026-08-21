@@ -228,15 +228,39 @@ generate()
         sdk_path="wiseconnect3_sdk"
     fi
 
-    # Skip generation if previously generated
-    if [ -d "${generation_dir}" ] && [ ${force} -ne 1 ]; then
+    # Skip generation only when it would produce what is already there.
+    #
+    # The test used to be "the output directory exists", which meant every
+    # change to the project file was silently ignored: slc_generate.py rebuilds
+    # this .slcp from the Kconfig on every build, so adding a component or
+    # changing a configuration landed in the .slcp and then went nowhere, and
+    # the build carried on against a stale export. Adding psram_core and
+    # psram_aps6404l_sqh to the platform project cost a round of confusion for
+    # exactly this reason -- the #error they fix was still there afterwards.
+    #
+    # So keep a copy of the .slcp that produced the current export and compare
+    # against it. cmp rather than a hash because the .slcp is small and cmp is
+    # everywhere, including a Windows shell; a byte comparison also needs no
+    # opinion about which hashing tool exists. build_kconfig2slcp.py writes no
+    # timestamps, so identical inputs give an identical file and the comparison
+    # does not thrash.
+    local slcp_stamp="${generation_dir}/.tuyaopen_generated_from.slcp"
+    if [ -d "${generation_dir}" ] && [ ${force} -ne 1 ] \
+        && [ -f "${slcp_stamp}" ] && cmp -s "${slcp}" "${slcp_stamp}"; then
         set +x
         echo "======================================================================"
         echo "Skipping generation for '${project_name}'."
-        echo "output dir already exists: ${generation_dir}:"
+        echo "unchanged since the last generation: ${slcp}"
         echo "======================================================================"
         set -x
         exit
+    fi
+    if [ -d "${generation_dir}" ] && [ ${force} -ne 1 ]; then
+        set +x
+        echo "======================================================================"
+        echo "Regenerating '${project_name}': the project file changed."
+        echo "======================================================================"
+        set -x
     fi
 
     trust_sdk_and_extensions
@@ -255,6 +279,10 @@ generate()
 
     overwrite_linkerfile "$generation_dir" "${project_name}"
     patch_linkerfile "$generation_dir"
+
+    # Last, so that a generation that died part-way leaves no stamp and the
+    # next build tries again instead of trusting a half-written export.
+    cp "${slcp}" "${slcp_stamp}"
 }
 
 cleanup()

@@ -1,6 +1,8 @@
 # Getting Started with TuyaOpen for SiWx917 Platform
 
-This guide explains how to set up and build TuyaOpen with SiWx917 support on Linux.
+This guide explains how to set up and build TuyaOpen with SiWx917 support on Linux
+and on macOS. See [Prerequisites](#prerequisites) for what has actually been run on
+which host.
 
 The SiWx917 platform is **not** a standalone project. It must live inside the TuyaOpen tree at:
 
@@ -29,11 +31,13 @@ The SiWx917 platform is **not** a standalone project. It must live inside the Tu
 
 ## Prerequisites
 
-- **OS:** Ubuntu 22.04 LTS (recommended) or compatible Linux
+Needed on every host:
+
 - **Git**
-- **Python 3.12** (managed by `export.sh` / `uv`)
-- Build tools are installed automatically by `export.sh` (CMake, Ninja, and Python packages)
-- Silicon Labs SLC / Simplicity tools (pulled by `platform_prepare.py` as needed)
+- **Python 3.12** -- installed and managed by `export.sh` / `uv`, not by you
+- CMake, Ninja and the Python packages -- installed by `export.sh`
+- Silicon Labs SLC and Simplicity Commander -- fetched by `platform_prepare.py`
+  into `platform/SiWx917/tools/`, nothing goes into the system
 
 Verify basics:
 
@@ -41,6 +45,38 @@ Verify basics:
 python3 --version
 git --version
 ```
+
+### Host platforms
+
+What has actually been run, rather than what ought to work:
+
+| Host | State |
+|------|-------|
+| Ubuntu 22.04 LTS or compatible Linux | build, flash, monitor |
+| macOS 15 on Intel (`x86_64`) | build, flash, monitor -- measured 2026-08-21 |
+| macOS on Apple Silicon | untested |
+| Windows | untested -- the code paths exist and have never run |
+
+### macOS
+
+- **Xcode Command Line Tools is all you need**: `xcode-select --install`.
+  Homebrew is not required, and nothing here installs system packages on a Mac
+  -- verified by a build that left the Homebrew formula count unchanged.
+- **Ignore `/usr/bin/java`.** On macOS it is a stub that answers `command -v`
+  and then fails with "Unable to locate a Java Runtime". The bootstrap tests
+  whether java *runs*, and fetches a Temurin JRE into
+  `platform/SiWx917/tools/jre` for slc when it does not. Installing Homebrew's
+  `openjdk` does not help either: that formula is keg-only and never becomes
+  `java`.
+- **The first `source export.sh` is slow and silent.** There is no prebuilt
+  `cryptography` wheel for macOS `x86_64` on Python 3.12, so uv builds it from
+  source -- about 15 minutes, measured, with no output while it works, because
+  `export.sh` runs uv with `--quiet`. If it is stuck rather than slow,
+  `TUYAOPEN_EXPORT_VERBOSE=1` shows uv's own progress and errors, and
+  `TUYAOPEN_PYPI_MIRROR=0` switches off the mainland-China mirror (which did
+  stall once, for 12 minutes at 0% CPU).
+- **Serial ports** appear as `/dev/cu.usbserial-*`. Both `tos.py flash` and
+  `tos.py monitor` list what they find, so there is nothing to configure.
 
 ## Project Structure
 
@@ -129,7 +165,13 @@ Run `source export.sh` in every new terminal session before building.
 ### Step 4: Configure the Application
 
 Select the board config with `tos.py config choice` and pick **`SIWX917_AI_DEV_KIT.config`**
-by name — the menu index shifts as new board configs are added.
+by name — the menu index shifts as new board configs are added. `-c NAME` skips the
+menu entirely, which is what to use in a script:
+
+```bash
+tos.py config choice -c SIWX917_AI_DEV_KIT   # by name, no prompt
+tos.py config choice -l                      # list what is on offer
+```
 
 ```bash
 cd ~/TuyaOpen/apps/tuya_cloud/switch_demo   # smoke test first
@@ -190,7 +232,7 @@ Firmware artifacts are under the app `dist/` / `.build/` directories.
 | Board (AI kit) | `SIWX917_AI_DEV_KIT` |
 | Platform repo | `platform/SiWx917` |
 | Chat bot config | `apps/tuya.ai/your_chat_bot/config/SIWX917_AI_DEV_KIT.config` |
-| Switch demo config | `apps/tuya_cloud/switch_demo/config/SIWX917_AI_DEV_KIT.config` |
+| Switch demo config | none of its own; `switch_demo` has no `config/` directory, so `config choice` there offers the board defaults from `boards/SiWx917/config/` |
 
 ## Next Steps
 

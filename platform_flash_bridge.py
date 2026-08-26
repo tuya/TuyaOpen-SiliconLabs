@@ -59,6 +59,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 
 # -----------------------------------------------------------------------------
 #                                  Constants
@@ -136,7 +137,10 @@ RPS_FLAG_COMBINED = 0x80      # set on images eligible for / produced by combini
 # Skip the prompts. SIWX917_FLASH answers the target menu, SIWX917_CHANNEL the
 # channel menu.
 FLASH_ACTION_ENV = "SIWX917_FLASH"
-FLASH_ACTIONS = ("app", "ta", "both")
+FLASH_ACTIONS = ("app", "ta", "both", "verify")
+ISP_BAUD_ENV = "SIWX917_ISP_BAUD"
+ISP_BAUD_DEFAULT = 115200
+NWP_SLOTS = "0123456789abcdef"
 CHANNEL_ENV = "SIWX917_CHANNEL"
 CHANNELS = ("swd", "serial")
 
@@ -677,6 +681,8 @@ def _choose_action(logger, ta_note="") -> str:
         ("app", "M4 ONLY    application"),
         ("ta", "TA ONLY    NWP wireless firmware (erases the radio's flash)"),
         ("both", "TA + M4    NWP firmware, then the application"),
+        ("verify", "VERIFY     ask the bootloader whether the radio firmware "
+                   "is intact (writes nothing, ISP only)"),
     )
     print(MENU_RULE)
     for i, (_, label) in enumerate(options):
@@ -732,9 +738,200 @@ def _device_nwp_version(commander, device, serial, port, logger):
     return True, "" if _version_is_blank(version) else version
 
 
+
+# -----------------------------------------------------------------------------
+#                        NWP/TA integrity, via the ROM bootloader
+# -----------------------------------------------------------------------------
+#
+# nwp_firmware_version from `mfg917 info` is stored metadata. A board has been
+# seen reporting a version while the application still failed with
+# SL_STATUS_VALID_FIRMWARE_NOT_PRESENT (16056), so the version answers "is
+# something stored", never "is it usable". The bootloader's
+#
+#   K Check Wireless Firmware Integrity (Image No : 0-f)
+#
+# is the only thing that separates the two. It reads; it writes no flash.
+#
+# Only over the ISP UART: this is a ROM bootloader menu, and SWD has no way to
+# reach it. GETTING_STARTED.md, "Talking to the ROM bootloader", has the wiring
+# and how to enter ISP mode.
+#
+# There are 16 slots. Checking all of them costs a minute and is worth it,
+# because a bad slot 0 beside a good slot 5 is repaired by the menu's
+# '5 Select Default Wireless Firmware' -- a selector, not 1.6 MB.
+
+INTEGRITY_GOOD = ("success", "valid", "pass", "ok", "good")
+INTEGRITY_BAD = ("fail", "invalid", "corrupt", "error", "not present")
+
+
+def _isp_baud(logger) -> int:
+    raw = os.environ.get(ISP_BAUD_ENV, "").strip()
+    if not raw:
+        return ISP_BAUD_DEFAULT
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(f"{ISP_BAUD_ENV}={raw} is not a number, using "
+                       f"{ISP_BAUD_DEFAULT}.")
+        return ISP_BAUD_DEFAULT
+
+
+def _serial_module(logger):
+    try:
+        import serial
+        return serial
+    except ImportError:
+        logger.warning("pyserial is not installed, so the integrity check "
+                       "cannot run. `pip install pyserial`, or follow "
+                       "GETTING_STARTED.md by hand.")
+        return None
+
+
+def _drain(sp, total=2.0, quiet=0.4) -> bytes:
+    """Read until the device has been quiet for `quiet` seconds."""
+    buf = b""
+    end = time.monotonic() + total
+    while time.monotonic() < end:
+        chunk = sp.read(4096)
+        if chunk:
+            buf += chunk
+            end = time.monotonic() + quiet
+    return buf
+
+
+def _bootloader_menu(sp, logger):
+    """Wake the ROM bootloader and return its menu, or b"" if it is not there."""
+    sp.reset_input_buffer()
+    sp.write(b"\x1c")
+    sp.flush()
+    _drain(sp, 2.0)
+    sp.write(b"U")
+    sp.flush()
+    menu = _drain(sp, 4.0)
+    if b"BootLoader" not in menu:
+        logger.error("No bootloader menu on this port. Is the chip in ISP "
+                     "mode -- GPIO_34 held low, Reset tapped -- and is this "
+                     "the ISP UART on GPIO_8/GPIO_9 rather than the console?")
+        logger.debug(f"got: {menu[:200]!r}")
+        return b""
+    return menu
+
+
+def _read_slot_verdicts(port, baud, logger):
+    """{slot: verdict} for every NWP slot, or None if the port never answered.
+
+    Verdicts are the bootloader's own words reduced to one of good/bad/unclear;
+    "unclear" is kept distinct from "bad" because a reply this does not
+    recognise is not a broken slot, and calling it one would send someone to
+    rewrite 1.6 MB for nothing.
+    """
+    serial_mod = _serial_module(logger)
+    if serial_mod is None:
+        return None
+    try:
+        sp = serial_mod.Serial(port, baud, timeout=0.2)
+    except Exception as e:
+        logger.error(f"Cannot open {port} at {baud}: {e}")
+        return None
+
+    try:
+        if not _bootloader_menu(sp, logger):
+            return None
+        logger.info(f"Bootloader is up. Checking {len(NWP_SLOTS)} slots -- "
+                    "read-only, no flash is written.")
+        verdicts = {}
+        for slot in NWP_SLOTS:
+            sp.write(b"U")
+            sp.flush()
+            _drain(sp, 1.5)
+            sp.write(b"K")
+            sp.flush()
+            prompt = _drain(sp, 3.0)
+            sp.write(slot.encode())
+            sp.flush()
+            # Verifying 1.6 MB takes seconds; a short quiet window would call
+            # a slow pass a no-reply.
+            body = _drain(sp, 15.0, quiet=1.5)
+            text = (prompt + body).decode("utf-8", "replace").lower()
+            if not body:
+                verdicts[slot] = "no reply"
+            elif any(w in text for w in INTEGRITY_GOOD):
+                verdicts[slot] = "good"
+            elif any(w in text for w in INTEGRITY_BAD):
+                verdicts[slot] = "bad or empty"
+            else:
+                verdicts[slot] = "unclear"
+            logger.debug(f"slot {slot}: {verdicts[slot]}  {text[:120]!r}")
+        return verdicts
+    finally:
+        sp.close()
+
+
+def _report_integrity(port, baud, logger):
+    """Check every slot and say what it means.
+
+    True   some slot holds intact firmware
+    False  the bootloader answered and no slot does
+    None   the question could not be put -- no menu, no pyserial, no port.
+           Distinct from False on purpose: "not asked" is not "answered no",
+           and only one of them means the firmware needs rewriting.
+    """
+    verdicts = _read_slot_verdicts(port, baud, logger)
+    if verdicts is None:
+        return None
+
+    logger.info("  " + "  ".join(f"{k}:{v}" for k, v in verdicts.items()))
+    good = [k for k, v in verdicts.items() if v == "good"]
+    if good:
+        logger.info(f"  Slots reporting intact firmware: {', '.join(good)}")
+        if "0" not in good:
+            logger.warning("  Slot 0 is not among them. If the application "
+                           "still reports 16056, the bootloader's record of "
+                           "which image to load is the thing to repair -- its "
+                           "'5 Select Default Wireless Firmware' costs a "
+                           "selector, not 1.6 MB. GETTING_STARTED.md, "
+                           "\"Recovering a device whose radio will not "
+                           "start\".")
+        return True
+
+    # No good slot is only a verdict on the firmware if some slot actually
+    # said it is broken. Silence and replies this cannot read are the question
+    # failing to get through, and sending someone to rewrite 1.6 MB over that
+    # is the mistake this whole check exists to avoid.
+    if not any(v == "bad or empty" for v in verdicts.values()):
+        logger.warning("  No slot reported intact firmware, but none reported "
+                       "broken firmware either -- they were silent or replied "
+                       "something this cannot read. That is the question not "
+                       "getting through, not a verdict. Read the replies with "
+                       "--verbose before acting on them.")
+        return None
+
+    logger.error("  No slot reports intact firmware. Writing the image is now "
+                 "the thing to do -- 'B' plus a slot number, per "
+                 "GETTING_STARTED.md.")
+    return False
+
+
 # -----------------------------------------------------------------------------
 #                                  Writing
 # -----------------------------------------------------------------------------
+
+
+def _confirm_integrity_after_write(serial, port, logger) -> None:
+    """Say whether the written firmware is intact, or why that is unknown.
+
+    Advisory: the write is already reported, and a check that cannot run must
+    not turn a good write into a failure. What it must not do is leave the
+    caller thinking a version read-back settled the question.
+    """
+    if serial:
+        _report_integrity(port, _isp_baud(logger), logger)
+        return
+    logger.info("  Integrity was not checked: that is a ROM bootloader "
+                "command and SWD cannot carry it. The version above is stored "
+                "metadata -- a board has been seen reporting one while the "
+                "application still failed with 16056. To settle it, enter ISP "
+                "mode and run this with a serial channel and VERIFY.")
 
 def _ta_landed_anyway(commander, image, device, serial, port, logger,
                       version_before=None) -> bool:
@@ -909,6 +1106,21 @@ def platform_flash(using_data=None,
     if not action:
         return {"success": False, "message": "flash cancelled"}
 
+    if action == "verify":
+        if not serial:
+            logger.error("The integrity check is a ROM bootloader command, so "
+                         "it needs the ISP UART; SWD cannot carry it. Re-run "
+                         "and pick a serial channel, with the chip in ISP "
+                         "mode. GETTING_STARTED.md, \"Talking to the ROM "
+                         "bootloader\".")
+            return {"success": False, "message": "verify needs the ISP UART"}
+        verdict = _report_integrity(chosen, _isp_baud(logger), logger)
+        if verdict is None:
+            return {"success": False,
+                    "message": "could not ask the bootloader"}
+        return {"success": verdict,
+                "message": "" if verdict else "no intact NWP slot"}
+
     if action in ("ta", "both") and not ta_image:
         _find_ta_image(logger)          # now it is an error, so say so
         return {"success": False, "message": "no usable NWP/TA image"}
@@ -925,6 +1137,7 @@ def platform_flash(using_data=None,
             ok = _ta_landed_anyway(commander, ta_image, device, serial, chosen,
                                    logger, device_ver if answered else None)
         if ok:
+            _confirm_integrity_after_write(serial, chosen, logger)
             logger.warning(TA_AFTER_WRITE)
         elif answered:
             logger.error(TA_WRITE_FAILED.format(device=device))
@@ -954,5 +1167,6 @@ def platform_flash(using_data=None,
                 logger.error("The NWP firmware was written but the application "
                              "was not. Re-run and pick M4 ONLY.")
             return {"success": False, "message": f"{what} flash failed"}
+    _confirm_integrity_after_write(serial, chosen, logger)
     logger.warning(TA_AFTER_WRITE)
     return {"success": True, "message": ""}

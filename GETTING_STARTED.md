@@ -268,6 +268,20 @@ SIWX917_FLASH=ta tos.py flash              # over SWD, if a probe is attached
 SIWX917_FLASH=ta tos.py flash -p /dev/ttyUSB0   # over serial/ISP
 ```
 
+After a write over the ISP UART the menu's **VERIFY** entry runs by itself, and
+it can be run on its own at any time -- it writes nothing:
+
+```bash
+SIWX917_FLASH=verify tos.py flash -p /dev/ttyUSB0
+SIWX917_ISP_BAUD=921600 SIWX917_FLASH=verify tos.py flash -p /dev/ttyUSB0
+```
+
+It asks the bootloader to check all 16 slots. Over SWD it refuses instead of
+guessing: that is a ROM bootloader command and SWD cannot carry it. The version
+`mfg917 info` prints is stored metadata, and a board has been seen reporting one
+while the application still failed with 16056 -- so a version is not a substitute
+for this.
+
 Both channels can write it. Over SWD, `commander rps load` uploads a
 flash-loader algorithm into RAM and lets it drive the NWP bootloader -- the
 mechanism AN1497 (SiWx917 SoC SWD Algorithm Programmer) documents; Commander

@@ -736,6 +736,77 @@ def _device_nwp_version(commander, device, serial, port, logger):
 #                                  Writing
 # -----------------------------------------------------------------------------
 
+def _ta_landed_anyway(commander, image, device, serial, port, logger,
+                      version_before=None) -> bool:
+    """Is the radio running the image, despite Commander not confirming it?
+
+    "Flashloader is not ready" is the normal end of a successful NWP write on
+    this part: the NWP resets to finalise and takes the RAM-resident
+    flash-loader down with it, so nothing is left to answer the confirmation.
+    Treating that as failure is what made TA + M4 stop before the application.
+
+    So ask the question the failure message asks a human to answer by hand:
+    _rps_header knows what the image claims, mfg917 info reports what the
+    device runs, compare them.
+
+    What a match proves depends on version_before, the version read before the
+    write. None means it was never established -- the device did not answer --
+    which is not the same as "" for a device that answered and reported no
+    firmware:
+
+      before != want  a match is proof this write landed -- the version could
+                      not have changed on its own. A device that reported no
+                      firmware and now reports the image counts here.
+      before == want  a match proves only that the radio still runs the right
+                      version. It would read the same whether the write landed,
+                      landed partly, or did nothing, so it is not evidence
+                      about the write and must not be reported as any. Nothing
+                      here can settle that case; rewriting an identical image
+                      leaves no observable difference to settle it with.
+      before is None  same: with nothing to compare against, the read-back says
+                      what the radio runs and nothing about this write.
+
+    Either way the radio is verifiably running the expected version, which is
+    what the rest of the flash needs, so both continue. Only the claim differs.
+
+    No answer is not evidence and stays a failure.
+    """
+    info = _rps_header(image, logger)
+    want = (info or {}).get("version", "")
+    if not want:
+        return False
+
+    answered, have = _device_nwp_version(commander, device, serial, port, logger)
+    if not answered or not have:
+        logger.info("Could not read the NWP version back, so the write is "
+                    "unconfirmed either way.")
+        return False
+    if have != want:
+        logger.error(f"NWP version reads back as {have}, expected {want}.")
+        return False
+
+    if version_before is None:
+        logger.warning(
+            f"  Commander did not confirm the upgrade. The device reports "
+            f"{have}, which is the image's version, but what it ran before was "
+            f"never established, so the read-back cannot tell whether these "
+            f"bytes landed. What is confirmed is that the radio runs the "
+            f"expected version. Continuing.")
+    elif version_before == want:
+        logger.warning(
+            f"  Commander did not confirm the upgrade. The device reports "
+            f"{have}, but it reported that before this write too, so the "
+            f"read-back cannot tell whether these bytes landed -- rewriting an "
+            f"identical image leaves nothing to tell it by. What is confirmed "
+            f"is that the radio still runs the expected version. Continuing.")
+    else:
+        logger.warning(
+            f"  Commander did not confirm the upgrade, but the device reports "
+            f"{have} where it reported "
+            f"{version_before or 'no firmware'} before, so this write landed.")
+    return True
+
+
 def _load(commander, image, device, serial, port, fixedspeed, logger,
           link_proven=False) -> bool:
     """
@@ -850,6 +921,9 @@ def platform_flash(using_data=None,
     if action == "ta":
         ok = _load(commander, ta_image, device, serial, chosen, fixedspeed,
                    logger, answered)
+        if not ok:
+            ok = _ta_landed_anyway(commander, ta_image, device, serial, chosen,
+                                   logger, device_ver if answered else None)
         if ok:
             logger.warning(TA_AFTER_WRITE)
         elif answered:
@@ -871,6 +945,9 @@ def platform_flash(using_data=None,
         if not _load(commander, image, device, serial, chosen, fixedspeed,
                      logger, answered):
             if what == "NWP":
+                if _ta_landed_anyway(commander, image, device, serial, chosen,
+                                     logger, device_ver if answered else None):
+                    continue
                 if answered:
                     logger.error(TA_WRITE_FAILED.format(device=device))
             else:

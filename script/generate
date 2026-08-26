@@ -159,13 +159,21 @@ patch_linkerfile()
 
 overwrite_linkerfile()
 {
+    # One script for every project. There used to be a second one selected by
+    # matching the project name against *switch_demo*, which is the kind of
+    # branch that turns an application into a special case of the platform.
+    #
+    # It was also stale: it arrived with the initial import and never picked up
+    # the internal-RAM placements the AI player work added here, so the two had
+    # drifted into "the current layout" and "the layout from before that
+    # change" rather than into two deliberate variants. Its extra placements
+    # name object files a non-AI build does not produce, so they match nothing
+    # and cost nothing; its psram region also started 0x1000 lower and ended
+    # short of psram_bss, where this one abuts it exactly.
+    #
+    # Verified by building switch_demo against this script on both boards.
     local tuyaopen_linker_file="${script_dir}/../mcu/defaults/linkerfile_psram_SoC.ld"
-    local switch_demo_linker_file="${script_dir}/../mcu/defaults/linkerfile_switch_demo.ld"
     local linker_file=""
-
-    if [[ $2 == *switch_demo* ]]; then
-        tuyaopen_linker_file="${switch_demo_linker_file}"
-    fi
 
     if [ -f "$1/autogen/linkerfile_psram_SoC.ld" ]; then
         linker_file="$1/autogen/linkerfile_psram_SoC.ld"

@@ -92,11 +92,48 @@ What has actually been run, rather than what ought to work:
 │   └── SiWx917/                     # this platform repository
 │       ├── tuyaos_adapter/
 │       ├── mcu/
+│       │   ├── boards/              # SLC board configuration, see below
 │       │   └── patch/RS9117_WC_SI.rps   # TA firmware (flash once per device)
 │       ├── slc/
 │       └── tools/
 └── export.sh
 ```
+
+### Why board configuration lives in this repository
+
+On other TuyaOpen platforms a board is described entirely under
+`boards/<PLATFORM>/<BOARD>/`, and the platform repository holds nothing
+board-specific. T5AI has twenty boards that way. This one does not, and the
+reason is SLC rather than tidiness.
+
+SLC resolves a component only from an *extension*, and an extension is the
+directory holding a `.slce` file. This repository is that directory
+(`tuyaopen-si91x.slce` at its root), so a board that needs an SLC component has
+to be declared inside it. Only one board does:
+
+| Board | Declared by | In this repository |
+|---|---|---|
+| BRD2605A | the vendored WiSeConnect SDK, which ships `brd2605a.slcc` | nothing |
+| SIWX917_AI_DEV_KIT | nobody -- it is a custom board, so the component is written here | `mcu/boards/siwx917_ai_dev_kit/` (14 config headers) plus two `.slcc` |
+
+`mcu/boards/common_config/` is chip-level, not board-level: GSPI and SSI
+configuration that any board on this part uses.
+
+Moving the board half out to `boards/SiWx917/SIWX917_AI_DEV_KIT/` was tried on
+2026-08-27 and does not work with this SLC. `script/generate` already accepts a
+second extension directory, and adding `boards/SiWx917` with its own `.slce`
+gets as far as `Trusting extension 'tuyaopen-si91x-boards'` and a symlink under
+`sdks/simplicity_sdk/extension/`. Generation then stops at
+
+```text
+Component siwx917_ai_dev_kit from tuyaopen-si91x-boards does not exist.
+```
+
+with no further diagnostics, including under `-v DEBUG`. Two `component_path`
+layouts, a wiped `-data` directory, an explicit re-trust and a version bump to
+force re-registration all end the same way. So a board component appears not to
+be resolvable from a second extension here; if that is wrong, the thing to find
+out is what makes SLC index one extension's components and not another's.
 
 ## Overview
 

@@ -209,7 +209,8 @@ install_arm_toolchain()
     # the other platforms, so a seeded tarball is a hit. macOS stays on
     # arm-gnu-toolchain-12.2: 10.3 ships no native arm64 build and would run
     # under Rosetta on Apple silicon.
-    local release tarball_name url_base
+    local release tarball_name url_base cdn_url_base=""
+    local tuya_cdn="https://images.tuyacn.com/smart/embed/package/tuyaopen"
     case "$(uname -s)" in
         Darwin)
             if [ "$(uname -m)" = "arm64" ]; then
@@ -224,6 +225,7 @@ install_arm_toolchain()
             release="gcc-arm-none-eabi-10.3-2021.10"
             tarball_name="${release}-win32.zip"
             url_base="https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu-rm/10.3-2021.10"
+            cdn_url_base="${tuya_cdn}"
             ;;
         *)
             release="gcc-arm-none-eabi-10.3-2021.10"
@@ -233,6 +235,7 @@ install_arm_toolchain()
                 tarball_name="${release}-x86_64-linux.tar.bz2"
             fi
             url_base="https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu-rm/10.3-2021.10"
+            cdn_url_base="${tuya_cdn}"
             ;;
     esac
 
@@ -271,6 +274,9 @@ install_arm_toolchain()
     fi
     if [ -f "${tarball}" ]; then
         echo "Found ${tarball_name} already present. Skipping download"
+    elif [ -z "${1-}" ] && [ "${OPEN_COUNTRY_CODE-}" = "China" ] && [ -n "${cdn_url_base}" ]; then
+        download_file "${cdn_url_base}/${tarball_name}" "${tarball}" \
+            || download_file "${url}" "${tarball}"
     else
         download_file "${url}" "${tarball}"
     fi

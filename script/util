@@ -48,6 +48,7 @@ download_file()
 {
     local url="$1"
     local dest="$2"
+    local ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
     # Land the file only once it is whole. curl and wget both leave whatever
     # arrived behind when a transfer dies, so writing straight to ${dest} means
@@ -75,10 +76,20 @@ download_file()
         fi
         # shellcheck disable=SC2086
         curl -fL --retry 4 ${retry_all} --retry-delay 3 \
-            --progress-bar -o "${part}" "${url}" \
+            --progress-bar --compressed \
+            -H "User-Agent: ${ua}" \
+            -H "Sec-Fetch-Dest: document" \
+            -H "Sec-Fetch-Mode: navigate" \
+            -H "Sec-Fetch-Site: none" \
+            -o "${part}" "${url}" \
             || { rm -f "${part}"; return 1; }
     elif command -v wget > /dev/null 2>&1; then
-        wget --tries 4 --waitretry 3 "${url}" -O "${part}" \
+        wget --tries 4 --waitretry 3 \
+            --user-agent="${ua}" \
+            --header="Sec-Fetch-Dest: document" \
+            --header="Sec-Fetch-Mode: navigate" \
+            --header="Sec-Fetch-Site: none" \
+            "${url}" -O "${part}" \
             || { rm -f "${part}"; return 1; }
     else
         die "neither curl nor wget is available to download ${url}"

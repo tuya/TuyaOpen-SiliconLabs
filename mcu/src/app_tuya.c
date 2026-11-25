@@ -47,7 +47,7 @@
 #include "sl_wifi_callback_framework.h"
 
 #include "tuya_cloud_types.h"
-#include "tal_api.h"
+#include "core_api.h"
 #include "tkl_log.h"
 #include "tkl_memory.h"
 #include "tkl_system.h"
@@ -164,9 +164,9 @@ static void app_main_handle(void *arg)
     tkl_system_sleep(3000);
 
     TKL_LOGI("Running TuyaOpen application [%d]", (int)(tkl_system_get_millisecond() - ms));
-    tkl_log_output_set(tal_log_print_raw);
+    tkl_log_output_set(core_log_print_raw);
     tuya_app_main();
-    tal_thread_delete(app_main_thread);
+    core_thread_delete(app_main_thread);
     app_main_thread    = NULL;
     app_main_init_done = true;
 }
@@ -176,7 +176,7 @@ void app_init(const void *unused)
     TUYA_UNUSED(unused);
     THREAD_CFG_T thrd_param = {4096, 0, "app_main_thread"};
 
-    tal_thread_create_and_start(&app_main_thread, NULL, NULL, app_main_handle, NULL, &thrd_param);
+    core_thread_create_and_start(&app_main_thread, NULL, NULL, app_main_handle, NULL, &thrd_param);
 }
 
 #if defined(ENABLE_ML_AUDIO_CLASSIFIER) && (ENABLE_ML_AUDIO_CLASSIFIER == 1)

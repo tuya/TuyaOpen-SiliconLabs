@@ -53,7 +53,14 @@ OPERATE_RET tkl_mutex_create_init(TKL_MUTEX_HANDLE *handle)
         return OPRT_INVALID_PARM;
     }
 
-    *handle = (TKL_MUTEX_HANDLE)osMutexNew(NULL);
+    static const osMutexAttr_t mutex_attr = {
+        .name      = NULL,
+        .attr_bits = osMutexRecursive | osMutexPrioInherit,
+        .cb_mem    = NULL,
+        .cb_size   = 0U,
+    };
+
+    *handle = (TKL_MUTEX_HANDLE)osMutexNew(&mutex_attr);
     if (NULL == *handle) {
         return OPRT_OS_ADAPTER_MUTEX_CREAT_FAILED;
     }
@@ -99,7 +106,7 @@ OPERATE_RET tkl_mutex_trylock(const TKL_MUTEX_HANDLE handle)
         return OPRT_INVALID_PARM;
     }
 
-    osStatus_t status = osMutexAcquire((osMutexId_t)handle, osWaitForever);
+    osStatus_t status = osMutexAcquire((osMutexId_t)handle, 0U);
     if (status != osOK) {
         return OPRT_OS_ADAPTER_MUTEX_LOCK_FAILED;
     }

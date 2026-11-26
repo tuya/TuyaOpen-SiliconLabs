@@ -1,6 +1,9 @@
 #ifndef __TKL_BLUETOOTH_H__
 #define __TKL_BLUETOOTH_H__
 
+/* Platform provides the TKL BLE GAP/GATT API (via bundled NimBLE on tkl_hci). */
+#define TUYAOPEN_HAS_TKL_BLE 1
+
 #include "tkl_bluetooth_def.h"
 
 #ifdef __cplusplus

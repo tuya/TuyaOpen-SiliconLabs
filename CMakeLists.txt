@@ -77,6 +77,7 @@ set(ADAPTER_SRC
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_fs.c"
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_lwip.c"
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_network.c"
+    "${CMAKE_SOURCE_DIR}/tuyaos_adapter/tuyaopen/netif_ops.c"
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_ota.c"
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_vad.c"
     "${CMAKE_SOURCE_DIR}/tuyaos_adapter/src/tkl_asr.c"

@@ -206,7 +206,7 @@ SECTIONS
         *libtal_bluetooth.a:*(.bss .bss.*)
         *libtal_kv.a:*(.bss .bss.*)
         *libtal_wifi.a:*(.bss .bss.*)
-        *libtuyaos.a:*(.bss .bss.*)
+        *libtuyaopen.a:*(.bss .bss.*)
         *libcommon.a:*(.bss .bss.*)
         *libliblwip.a:*(.bss .bss.*)
         *libtal_cellular.a:*(.bss .bss.*)

@@ -45,7 +45,11 @@ def check_dependency_changes(build_param_path, build_dir="build"):
             return False
             
         # 检查关键库文件
-        key_libs = ['libtuyaapp.a', 'libtuyaos.a']
+        need_libs = param_data.get('PLATFORM_NEED_LIBS', '').split()
+        key_libs = [
+            lib if (lib.startswith('lib') and lib.endswith('.a')) else f'lib{lib}.a'
+            for lib in need_libs
+        ] or ['libtuyaapp.a', 'libtuyaopen.a']
         current_exe = os.path.join(build_dir, project_name)
         
         if not os.path.exists(current_exe):
